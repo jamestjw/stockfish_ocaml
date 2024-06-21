@@ -1,0 +1,4 @@
+(executable
+ (public_name stockfish_ocaml)
+ (name main)
+ (libraries stockfish_ocaml))

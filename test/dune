@@ -1,0 +1,2 @@
+(test
+ (name test_stockfish_ocaml))
