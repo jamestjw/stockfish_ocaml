@@ -22,6 +22,7 @@
  (depends
    ocaml
    dune
+   integers
    ppx_jane
    ppx_deriving)
  (tags

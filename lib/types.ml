@@ -156,6 +156,74 @@ module Types = struct
     | H8
   [@@deriving enum, sexp, ord]
 
+  let all_squares =
+    [
+      A1;
+      B1;
+      C1;
+      D1;
+      E1;
+      F1;
+      G1;
+      H1;
+      A2;
+      B2;
+      C2;
+      D2;
+      E2;
+      F2;
+      G2;
+      H2;
+      A3;
+      B3;
+      C3;
+      D3;
+      E3;
+      F3;
+      G3;
+      H3;
+      A4;
+      B4;
+      C4;
+      D4;
+      E4;
+      F4;
+      G4;
+      H4;
+      A5;
+      B5;
+      C5;
+      D5;
+      E5;
+      F5;
+      G5;
+      H5;
+      A6;
+      B6;
+      C6;
+      D6;
+      E6;
+      F6;
+      G6;
+      H6;
+      A7;
+      B7;
+      C7;
+      D7;
+      E7;
+      F7;
+      G7;
+      H7;
+      A8;
+      B8;
+      C8;
+      D8;
+      E8;
+      F8;
+      G8;
+      H8;
+    ]
+
   type direction =
     | NORTH
     | EAST
@@ -197,6 +265,9 @@ module Types = struct
     | FILE_H
   [@@deriving enum, sexp, ord]
 
+  let all_files =
+    [ FILE_A; FILE_B; FILE_C; FILE_D; FILE_E; FILE_F; FILE_G; FILE_H ]
+
   type rank =
     | RANK_1
     | RANK_2
@@ -207,6 +278,9 @@ module Types = struct
     | RANK_7
     | RANK_8
   [@@deriving enum, sexp, ord]
+
+  let all_ranks =
+    [ RANK_1; RANK_2; RANK_3; RANK_4; RANK_5; RANK_6; RANK_7; RANK_8 ]
 
   (* TODO: This needs to do more checks, e.g. H4 + EAST should be invalid *)
   let sq_plus_dir sq dir =
@@ -265,7 +339,7 @@ module Types = struct
     | B_QUEEN -> BLACK
     | B_KING -> BLACK
 
-  let mk_square file rank =
+  let mk_square ~file ~rank =
     Int.shift_left (rank_to_enum rank) 3 + file_to_enum file
     |> square_of_enum |> Stdlib.Option.get
 
@@ -403,11 +477,11 @@ let%test_unit "test_flip_sq_file" =
 
 let%test_unit "test_mk_square" =
   [%test_result: Types.square] ~expect:Types.E5
-    (Types.mk_square Types.FILE_E Types.RANK_5);
+    (Types.mk_square ~file:Types.FILE_E ~rank:Types.RANK_5);
   [%test_result: Types.square] ~expect:Types.H8
-    (Types.mk_square Types.FILE_H Types.RANK_8);
+    (Types.mk_square ~file:Types.FILE_H ~rank:Types.RANK_8);
   [%test_result: Types.square] ~expect:Types.A1
-    (Types.mk_square Types.FILE_A Types.RANK_1)
+    (Types.mk_square ~file:Types.FILE_A ~rank:Types.RANK_1)
 
 let%test_unit "test_file_of_sq" =
   [%test_result: Types.file] ~expect:Types.FILE_E (Types.file_of_sq Types.E4);
