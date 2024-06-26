@@ -95,6 +95,7 @@ module type BITBOARD = sig
   val msb : t -> t
   val pop_lsb : t -> t * t
   val sq_distance : Types.square -> Types.square -> int
+  val attacks_bb : Types.piece_type -> Types.square -> t -> t
 end
 
 module Bitboard : BITBOARD = struct
@@ -247,22 +248,6 @@ module Bitboard : BITBOARD = struct
 
   (* Initialisation of bitboards *)
 
-  (*
-   * * template<>
-   * * inline int distance<File>(Square x, Square y) {
-   * *     return std::abs(file_of(x) - file_of(y));
-   * * }
-   * * 
-   * * template<>
-   * * inline int distance<Rank>(Square x, Square y) {
-   * *     return std::abs(rank_of(x) - rank_of(y));
-   * * }
-   * * 
-   * * template<>
-   * * inline int distance<Square>(Square x, Square y) {
-   * *     return SquareDistance[x][y];
-   * * }
-   *)
   let distance_by_file sq1 sq2 =
     Int.abs
       (Types.file_to_enum (Types.file_of_sq sq1)
@@ -290,6 +275,414 @@ module Bitboard : BITBOARD = struct
       (Array.get sq_distance_tbl (Types.square_to_enum sq1))
       (Types.square_to_enum sq2)
 
+  (*
+   * Returns the bitboard of target square for the given step (enum of direction)
+   * from the given square. If the step is off the board, returns empty bitboard.
+   *)
+  let safe_destination sq step =
+    let dst = Types.square_of_enum (Types.square_to_enum sq + step) in
+    match dst with
+    (* TODO: Figure out why 2?? *)
+    | Some dst -> if sq_distance sq dst <= 2 then square_bb dst else empty
+    | None -> empty
+
+  let sliding_attack pt sq occupied =
+    let rec inner (attacks, sq) direction =
+      if
+        bb_not_zero (safe_destination sq (Types.direction_to_enum direction))
+        && (not @@ bb_not_zero (bb_and_sq occupied sq))
+      then
+        let sq = Types.sq_plus_dir sq direction |> Stdlib.Option.get in
+        let attacks = bb_or_sq attacks sq in
+        inner (attacks, sq) direction
+      else attacks
+    in
+    let directions =
+      match pt with
+      | Types.ROOK -> [ Types.NORTH; Types.SOUTH; Types.EAST; Types.WEST ]
+      | Types.BISHOP ->
+          [
+            Types.NORTH_EAST;
+            Types.SOUTH_EAST;
+            Types.SOUTH_WEST;
+            Types.NORTH_WEST;
+          ]
+      | _ -> failwith "Invalid piece type"
+    in
+    List.fold ~init:UInt64.zero
+      ~f:(fun attacks dir -> inner (attacks, sq) dir)
+      directions
+
+  type magic = {
+    mask : t;
+    magic : t;
+    attacks_offset : int; (* Offset into the table for this particular magic *)
+    shift : int;
+  }
+
+  let empty_magic =
+    { magic = empty; mask = empty; shift = 0; attacks_offset = 0 }
+
+  let magic_index { mask; magic; shift; _ } occupied =
+    (* ((occupied & mask) * magic) >> shift *)
+    UInt64.Infix.((occupied land mask * magic) lsr shift) |> UInt64.to_int
+
+  (* Count number of set bits in UInt64 int *)
+  let popcount b =
+    let rec inner acc b =
+      (* for (r = 0; b; r++, b &= b - 1) *)
+      if bb_not_zero b then inner (acc + 1) UInt64.Infix.(b land UInt64.pred b)
+      else acc
+    in
+    inner 0 b
+
+  (* Run this once and save the magic numbers to save computation time *)
+  (* let compute_magics pt : magic array * t array =
+       let random_u64_fewbits () =
+         let random_u64 () =
+           let u1 =
+             Int64.(Random.bits64 () land of_int 0xffff) |> UInt64.of_int64
+           in
+           let u2 =
+             Int64.(Random.bits64 () land of_int 0xffff) |> UInt64.of_int64
+           in
+           let u3 =
+             Int64.(Random.bits64 () land of_int 0xffff) |> UInt64.of_int64
+           in
+           let u4 =
+             Int64.(Random.bits64 () land of_int 0xffff) |> UInt64.of_int64
+           in
+           UInt64.Infix.(u1 lor (u2 lsl 16) lor (u3 lsl 32) lor (u4 lsl 48))
+         in
+         UInt64.Infix.(random_u64 () land random_u64 () land random_u64 ())
+       in
+
+       let attacks_tbl =
+         match pt with
+         | Types.BISHOP -> Array.create ~len:0x1480 empty
+         | Types.ROOK -> Array.create ~len:0x19000 empty
+         | _ -> failwith "Invalid piece type"
+       in
+       let magics_tbl = Array.create ~len:64 empty_magic in
+       let occupancy = Array.create ~len:4096 empty in
+       let reference = Array.create ~len:4096 empty in
+       let epoch = Array.create ~len:4096 0 in
+
+       let do_square (cnt, offset) sq =
+         Random.init 42;
+         let rec carry_rippler b size mask =
+           Array.set occupancy size b;
+           Array.set reference size (sliding_attack pt sq b);
+
+           let b = UInt64.Infix.((b - mask) land mask) in
+           let size = size + 1 in
+           if bb_not_zero b then carry_rippler b size mask else size
+         in
+         let rec find_magic i size cnt m =
+           let rec gen_magic () =
+             let candidate = random_u64_fewbits () in
+             (* popcount((m.magic * m.mask) >> 56) < 6 *)
+             (* We need at least 6 set bits here *)
+             if popcount UInt64.Infix.((candidate * m.mask) lsr 56) < 6 then
+               gen_magic ()
+             else candidate
+           in
+           let rec map_occupancies cnt i m =
+             if i < size then
+               let idx = magic_index m (Array.get occupancy i) in
+               if Array.get epoch idx < cnt then (
+                 Array.set epoch idx cnt;
+                 Array.set attacks_tbl (offset + idx) @@ Array.get reference i;
+                 map_occupancies cnt (i + 1) m)
+               else if
+                 not
+                 @@ UInt64.equal
+                      (Array.get attacks_tbl (offset + idx))
+                      (Array.get reference i)
+               then i
+               else map_occupancies cnt (i + 1) m
+             else i
+           in
+           if i < size then
+             let magic = gen_magic () in
+             let m = { m with magic } in
+             let i = map_occupancies (cnt + 1) 0 m in
+             find_magic i size (cnt + 1) m
+           else (m, cnt)
+         in
+
+         (* We ignore squares on the edges when calculating piece occupancies,
+            e.g. for a rook that is on E4, we don't care whether or not the A4
+            square is occupied. *)
+         let edges =
+           (* ((Rank1BB | Rank8BB) & ~rank_bb(s)) | ((FileABB | FileHBB) & ~file_bb(s)) *)
+           UInt64.logor
+             (UInt64.logor rank_1 rank_8
+             |> UInt64.logand @@ UInt64.lognot @@ rank_bb_of_sq sq)
+             (UInt64.logor file_A file_H
+             |> UInt64.logand @@ UInt64.lognot @@ file_bb_of_sq sq)
+         in
+         (* The mask includes all the squares that a piece attacks (while ignoring
+            squares on the edges of the board). This is essentially the squares
+            from which pieces may block the attacker. *)
+         let mask =
+           UInt64.logand (sliding_attack pt sq empty) (UInt64.lognot edges)
+         in
+         (* The index must be big enough to contain all possible subsets of the mask,
+            hence we identify the number of non-zero bits in the mask to calculate
+            how many bits we need to eventually shift to get the index. Note: the index
+            refers to the N most significant bits of the 64bit integer. *)
+         let shift = 64 - popcount mask in
+
+         let m = { empty_magic with mask; shift; attacks_offset = offset } in
+         let size = carry_rippler empty 0 mask in
+         let m, cnt = find_magic 0 size cnt m in
+         (cnt, offset + size, m)
+       in
+       ignore
+       @@ List.fold_left ~init:(0, 0)
+            ~f:(fun (cnt, offset) sq ->
+              let cnt, offset, magic = do_square (cnt, offset) sq in
+              Array.set magics_tbl (Types.square_to_enum sq) magic;
+              (cnt, offset))
+            Types.all_squares;
+       Stdio.printf "Magic numbers for piece type %s\n" (Types.show_piece_type pt);
+       List.iter Types.all_squares ~f:(fun sq ->
+           Stdio.print_endline @@ UInt64.to_string
+           @@ (Array.get magics_tbl (Types.square_to_enum sq)).magic);
+       (magics_tbl, attacks_tbl)
+
+     let _ = compute_magics Types.BISHOP
+     let _ = compute_magics Types.ROOK *)
+
+  (* The below magic numbers were obtained by executing `compute_magics` *)
+  let bishop_magic_numbers =
+    let numbers =
+      [
+        "829805832255375376";
+        "36600556017784840";
+        "577701003651448834";
+        "20304132011524612";
+        "13836223675089657856";
+        "282816080259072";
+        "594585119226863617";
+        "1153066642425579648";
+        "1130641618387072";
+        "598138658259202";
+        "36361260519428";
+        "297422431876808704";
+        "2305862809294014466";
+        "2305984331363387396";
+        "4611695399846154240";
+        "4611695399846154240";
+        "2322238385162339";
+        "2322238385162339";
+        "299564159325307280";
+        "10133202259697680";
+        "72341921410321408";
+        "81628040170310144";
+        "12384942201899008";
+        "2305984331363387396";
+        "9842689571111043376";
+        "9842689571111043376";
+        "154249389039681792";
+        "36600543132532744";
+        "140876034736192";
+        "9225624111681372672";
+        "154249389039681792";
+        "28221174082437632";
+        "299144476361728";
+        "1130457951388932";
+        "1154047576312645696";
+        "653024147139985536";
+        "344527587701166336";
+        "167134357406465";
+        "2252920800411872";
+        "1153066642425579648";
+        "9306275275874304";
+        "2305984331363387396";
+        "10416896461739393280";
+        "4612250351368701952";
+        "2377918333149422080";
+        "3463303437408534784";
+        "1205067982046210";
+        "4613940018342265352";
+        "594585119226863617";
+        "324331743358812288";
+        "580965597761765634";
+        "2305984331363387396";
+        "31807015999898688";
+        "1130641618387072";
+        "829805832255375376";
+        "36600556017784840";
+        "1153066642425579648";
+        "4611695399846154240";
+        "1342072693318566976";
+        "1176143194900138240";
+        "36028798162011648";
+        "145276409863995521";
+        "1130641618387072";
+        "829805832255375376";
+      ]
+    in
+    let tbl = Array.create ~len:64 empty in
+    List.iteri ~f:(fun i num -> Array.set tbl i (UInt64.of_string num)) numbers;
+    tbl
+
+  let rook_magic_numbers =
+    let numbers =
+      [
+        "36028867888037890";
+        "18014673655832576";
+        "612524733829742720";
+        "4683761208946592032";
+        "144150389762162705";
+        "180146186266869761";
+        "5476385960173248642";
+        "6953557972836500736";
+        "140877074808832";
+        "4629770787023233024";
+        "3458905388756242432";
+        "4757067878259228800";
+        "140771848355968";
+        "703696040100864";
+        "4756082685775052804";
+        "27303081346631936";
+        "25475134695686144";
+        "141288317919232";
+        "72340168796799040";
+        "2342013093611048961";
+        "2342580991366857136";
+        "704237231145984";
+        "154578140994736898";
+        "293026445876538501";
+        "4756434535938293800";
+        "112590266635919376";
+        "144713341729768066";
+        "43986910707842";
+        "99087990042919042";
+        "55173495629414528";
+        "293369510679889936";
+        "72072446037197393";
+        "108231801612271649";
+        "653022083680305216";
+        "9655752796233797632";
+        "1157433919662985216";
+        "4611703632105048064";
+        "289356825889882624";
+        "13839851931415085712";
+        "2316015691968283805";
+        "36028934462128136";
+        "4591561094479872";
+        "1152956690069520402";
+        "1170953495436624000";
+        "288239172311875712";
+        "4398080098432";
+        "1263260803847684104";
+        "422779405074433";
+        "1188985765179162880";
+        "6922036200817559616";
+        "1152956696512073984";
+        "4611721271535732992";
+        "9224216479233736960";
+        "4398080098432";
+        "155375355409466368";
+        "144255926654738560";
+        "844974688059445";
+        "74591143977058822";
+        "2305878197914832961";
+        "14429569491857836069";
+        "2328923991748649090";
+        "6922314274110965255";
+        "1447951286704049412";
+        "598688648930314";
+      ]
+    in
+    let tbl = Array.create ~len:64 empty in
+    List.iteri ~f:(fun i num -> Array.set tbl i (UInt64.of_string num)) numbers;
+    tbl
+
+  let init_magics pt : magic array * t array =
+    let attacks_tbl, magic_number_tbl =
+      match pt with
+      | Types.BISHOP -> (Array.create ~len:0x1480 empty, bishop_magic_numbers)
+      | Types.ROOK -> (Array.create ~len:0x19000 empty, rook_magic_numbers)
+      | _ -> failwith "Invalid piece type"
+    in
+    let magics_tbl = Array.create ~len:64 empty_magic in
+
+    let do_square (cnt, offset) sq =
+      let rec carry_rippler b size ({ mask; attacks_offset; _ } as m) =
+        Array.set attacks_tbl
+          (attacks_offset + magic_index m b)
+          (sliding_attack pt sq b);
+        let b = UInt64.Infix.((b - mask) land mask) in
+        let size = size + 1 in
+        if bb_not_zero b then carry_rippler b size m else size
+      in
+
+      (* We ignore squares on the edges when calculating piece occupancies,
+         e.g. for a rook that is on E4, we don't care whether or not the A4
+         square is occupied. *)
+      let edges =
+        (* ((Rank1BB | Rank8BB) & ~rank_bb(s)) | ((FileABB | FileHBB) & ~file_bb(s)) *)
+        UInt64.logor
+          (UInt64.logor rank_1 rank_8
+          |> UInt64.logand @@ UInt64.lognot @@ rank_bb_of_sq sq)
+          (UInt64.logor file_A file_H
+          |> UInt64.logand @@ UInt64.lognot @@ file_bb_of_sq sq)
+      in
+      (* The mask includes all the squares that a piece attacks (while ignoring
+         squares on the edges of the board). This is essentially the squares
+         from which pieces may block the attacker. *)
+      let mask =
+        UInt64.logand (sliding_attack pt sq empty) (UInt64.lognot edges)
+      in
+      (* The index must be big enough to contain all possible subsets of the mask,
+         hence we identify the number of non-zero bits in the mask to calculate
+         how many bits we need to eventually shift to get the index. Note: the index
+         refers to the N most significant bits of the 64bit integer. *)
+      let shift = 64 - popcount mask in
+      let magic_number = Array.get magic_number_tbl (Types.square_to_enum sq) in
+      let m = { mask; shift; attacks_offset = offset; magic = magic_number } in
+      let size = carry_rippler empty 0 m in
+      (cnt, offset + size, m)
+    in
+    ignore
+    @@ List.fold_left ~init:(0, 0)
+         ~f:(fun (cnt, offset) sq ->
+           let cnt, offset, magic = do_square (cnt, offset) sq in
+           Array.set magics_tbl (Types.square_to_enum sq) magic;
+           (cnt, offset))
+         Types.all_squares;
+    (magics_tbl, attacks_tbl)
+
+  let bishop_magics, bishop_attacks = init_magics Types.BISHOP
+  let rook_magics, rook_attacks = init_magics Types.ROOK
+
+  let rec attacks_bb pt sq occupied =
+    match pt with
+    | Types.BISHOP ->
+        let ({ attacks_offset; _ } as magic) =
+          Array.get bishop_magics (Types.square_to_enum sq)
+        in
+        let index = magic_index magic occupied in
+        Array.get bishop_attacks (index + attacks_offset)
+    | Types.ROOK ->
+        let ({ attacks_offset; _ } as magic) =
+          Array.get rook_magics (Types.square_to_enum sq)
+        in
+        let index = magic_index magic occupied in
+        Array.get rook_attacks (index + attacks_offset)
+    | Types.QUEEN ->
+        UInt64.logor
+          (attacks_bb Types.BISHOP sq occupied)
+          (attacks_bb Types.ROOK sq occupied)
+    | Types.PAWN -> failwith "Not allowed!"
+    | _ -> failwith "not implemented yet"
+
+  (* Test of functions that we are not exposing outside of the module *)
+
   let%test_unit "test_lsb" =
     [%test_result: t] ~expect:(UInt64.of_int 0b0010)
       (lsb @@ UInt64.of_int 0b1010);
@@ -311,6 +704,108 @@ module Bitboard : BITBOARD = struct
     [%test_result: t * t]
       ~expect:(UInt64.of_int 0b100, UInt64.of_int 0b00110000)
       (pop_lsb @@ UInt64.of_int 0b00110100)
+
+  let%test_unit "test_popcount" =
+    [%test_result: int] ~expect:64 (popcount UInt64.max_int);
+    [%test_result: int] ~expect:34
+      (popcount
+      @@ UInt64.of_int
+           0b11110101010101010101111000001010100101010101010101010101011111)
+
+  let%test_unit "test_sliding_attack_bishop_empty_board" =
+    let attacks = sliding_attack Types.BISHOP Types.A1 empty in
+    let expected_attacked_squares =
+      [ Types.B2; Types.C3; Types.D4; Types.E5; Types.F6; Types.G7; Types.H8 ]
+    in
+    let expected_bb =
+      List.fold ~init:empty
+        ~f:(fun acc sq -> UInt64.logor acc (square_bb sq))
+        expected_attacked_squares
+    in
+    [%test_result: t] ~expect:expected_bb attacks
+
+  let%test_unit "test_sliding_attack_bishop_1_piece_obstructing_diagonal" =
+    let occupied = square_bb Types.D4 in
+    let attacks = sliding_attack Types.BISHOP Types.A1 occupied in
+    let expected_attacked_squares = [ Types.B2; Types.C3; Types.D4 ] in
+    let expected_bb =
+      List.fold ~init:empty
+        ~f:(fun acc sq -> UInt64.logor acc (square_bb sq))
+        expected_attacked_squares
+    in
+    [%test_result: t] ~expect:expected_bb attacks
+
+  let%test_unit "test_sliding_attack_bishop_2_pieces_obstructing_diagonal" =
+    let occupied = UInt64.Infix.(square_bb Types.D4 lor square_bb Types.E5) in
+    let attacks = sliding_attack Types.BISHOP Types.A1 occupied in
+    let expected_attacked_squares = [ Types.B2; Types.C3; Types.D4 ] in
+    let expected_bb =
+      List.fold ~init:empty
+        ~f:(fun acc sq -> UInt64.logor acc (square_bb sq))
+        expected_attacked_squares
+    in
+    [%test_result: t] ~expect:expected_bb attacks
+
+  let%test_unit "test_sliding_attack_rook_empty_board" =
+    let attacks = sliding_attack Types.ROOK Types.E4 empty in
+    let expected_attacked_squares =
+      [
+        (* Down *)
+        Types.E1;
+        Types.E2;
+        Types.E3;
+        (* Up *)
+        Types.E5;
+        Types.E6;
+        Types.E7;
+        Types.E8;
+        (* Left *)
+        Types.A4;
+        Types.B4;
+        Types.C4;
+        Types.D4;
+        (* Right *)
+        Types.F4;
+        Types.G4;
+        Types.H4;
+      ]
+    in
+    let expected_bb =
+      List.fold ~init:empty
+        ~f:(fun acc sq -> UInt64.logor acc (square_bb sq))
+        expected_attacked_squares
+    in
+    [%test_result: t] ~expect:expected_bb attacks
+
+  let%test_unit "test_sliding_attack_rook_1_piece_obstruction" =
+    let occupied =
+      UInt64.Infix.(
+        square_bb Types.E5 lor square_bb Types.E6 lor square_bb Types.C4)
+    in
+    let attacks = sliding_attack Types.ROOK Types.E4 occupied in
+    let expected_attacked_squares =
+      [
+        (* Down *)
+        Types.E1;
+        Types.E2;
+        Types.E3;
+        (* Up *)
+        Types.E5;
+        (* Left *)
+        Types.C4;
+        Types.D4;
+        (* Right *)
+        Types.F4;
+        Types.G4;
+        Types.H4;
+      ]
+    in
+    let expected_bb =
+      List.fold ~init:empty
+        ~f:(fun acc sq -> UInt64.logor acc (square_bb sq))
+        expected_attacked_squares
+    in
+    [%test_result: t] ~expect:expected_bb attacks
 end
 
 let%test_unit "test_more_than_one" =
@@ -349,3 +844,116 @@ let%test_unit "test_sq_distance" =
   [%test_result: int] ~expect:0 (Bitboard.sq_distance Types.A1 Types.A1);
   [%test_result: int] ~expect:1 (Bitboard.sq_distance Types.F6 Types.F5);
   [%test_result: int] ~expect:7 (Bitboard.sq_distance Types.H2 Types.A8)
+
+let%test_unit "test_magically_get_bishop_attack_empty_board" =
+  let attacks = Bitboard.attacks_bb Types.BISHOP Types.A1 Bitboard.empty in
+  let expected_attacked_squares =
+    [ Types.B2; Types.C3; Types.D4; Types.E5; Types.F6; Types.G7; Types.H8 ]
+  in
+  let expected_bb =
+    List.fold ~init:Bitboard.empty
+      ~f:(fun acc sq -> Bitboard.bb_or_sq acc sq)
+      expected_attacked_squares
+  in
+  [%test_result: Bitboard.t] ~expect:expected_bb attacks
+
+let%test_unit "test_magically_get_bishop_attack_self_obstruction" =
+  (* Proof that self obstruction doesn't matter *)
+  let attacks =
+    Bitboard.attacks_bb Types.BISHOP Types.A1 (Bitboard.square_bb Types.A1)
+  in
+  let expected_attacked_squares =
+    [ Types.B2; Types.C3; Types.D4; Types.E5; Types.F6; Types.G7; Types.H8 ]
+  in
+  let expected_bb =
+    List.fold ~init:Bitboard.empty
+      ~f:(fun acc sq -> Bitboard.bb_or_sq acc sq)
+      expected_attacked_squares
+  in
+  [%test_result: Bitboard.t] ~expect:expected_bb attacks
+
+let%test_unit "test_sliding_attack_bishop_1_piece_obstructing_diagonal" =
+  let occupied = Bitboard.square_bb Types.D4 in
+  let attacks = Bitboard.attacks_bb Types.BISHOP Types.A1 occupied in
+  let expected_attacked_squares = [ Types.B2; Types.C3; Types.D4 ] in
+  let expected_bb =
+    List.fold ~init:Bitboard.empty
+      ~f:(fun acc sq -> Bitboard.bb_or_sq acc sq)
+      expected_attacked_squares
+  in
+  [%test_result: Bitboard.t] ~expect:expected_bb attacks
+
+let%test_unit "test_sliding_attack_bishop_2_pieces_obstructing_diagonal" =
+  let occupied =
+    Bitboard.square_bb Types.D4 |> Fn.flip Bitboard.bb_or_sq Types.E5
+  in
+  let attacks = Bitboard.attacks_bb Types.BISHOP Types.A1 occupied in
+  let expected_attacked_squares = [ Types.B2; Types.C3; Types.D4 ] in
+  let expected_bb =
+    List.fold ~init:Bitboard.empty
+      ~f:(fun acc sq -> Bitboard.bb_or_sq acc sq)
+      expected_attacked_squares
+  in
+  [%test_result: Bitboard.t] ~expect:expected_bb attacks
+
+let%test_unit "test_magically_get_rook_attack_empty_board" =
+  let attacks = Bitboard.attacks_bb Types.ROOK Types.E4 Bitboard.empty in
+  let expected_attacked_squares =
+    [
+      (* Down *)
+      Types.E1;
+      Types.E2;
+      Types.E3;
+      (* Up *)
+      Types.E5;
+      Types.E6;
+      Types.E7;
+      Types.E8;
+      (* Left *)
+      Types.A4;
+      Types.B4;
+      Types.C4;
+      Types.D4;
+      (* Right *)
+      Types.F4;
+      Types.G4;
+      Types.H4;
+    ]
+  in
+  let expected_bb =
+    List.fold ~init:Bitboard.empty
+      ~f:(fun acc sq -> Bitboard.bb_or_sq acc sq)
+      expected_attacked_squares
+  in
+  [%test_result: Bitboard.t] ~expect:expected_bb attacks
+
+let%test_unit "test_magically_get_rook_attack_1_obstructing_piece" =
+  let occupied =
+    Bitboard.square_bb Types.E5
+    |> Fn.flip Bitboard.bb_or_sq Types.E6
+    |> Fn.flip Bitboard.bb_or_sq Types.C4
+  in
+  let attacks = Bitboard.attacks_bb Types.ROOK Types.E4 occupied in
+  let expected_attacked_squares =
+    [
+      (* Down *)
+      Types.E1;
+      Types.E2;
+      Types.E3;
+      (* Up *)
+      Types.E5;
+      (* Left *)
+      Types.C4;
+      Types.D4;
+      (* Right *)
+      Types.F4;
+      Types.G4;
+      Types.H4;
+    ]
+  in
+  let expected_bb =
+    List.fold ~init:Bitboard.empty
+      ~f:(fun acc sq -> Bitboard.bb_or_sq acc sq)
+      expected_attacked_squares
+  in
+  [%test_result: Bitboard.t] ~expect:expected_bb attacks

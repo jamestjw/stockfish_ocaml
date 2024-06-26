@@ -1,12 +1,18 @@
 (library
  (name stockfish_ocaml)
- (libraries base integers)
+ (libraries base integers )
  (inline_tests)
  (preprocess
   (pps
    ppx_deriving.enum
    ppx_deriving.eq
    ppx_deriving.ord
+   ppx_deriving.show
    ppx_sexp_conv
    ppx_inline_test
    ppx_assert)))
+
+(env
+ (release
+  (ocamlopt_flags
+   (:standard -O3 -unsafe -noassert -inline 100))))

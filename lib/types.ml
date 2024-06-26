@@ -59,7 +59,7 @@ module Types = struct
   (* TODO: Check if we need an enum of no piece and all pieces types. Wouldn't
      it be nicer to represent the absence of pieces using a None? *)
   type piece_type = PAWN | KNIGHT | BISHOP | ROOK | QUEEN | KING
-  [@@deriving enum, sexp, ord]
+  [@@deriving enum, sexp, ord, show]
 
   (* TODO: Check if the fancy integer arithmetic here is really necessary.
      Probably not actually| the point of this rewrite is to eliminate all the weird C++ stuff. *)
@@ -154,7 +154,7 @@ module Types = struct
     | F8
     | G8
     | H8
-  [@@deriving enum, sexp, ord]
+  [@@deriving enum, sexp, ord, eq]
 
   let all_squares =
     [
