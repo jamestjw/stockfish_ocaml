@@ -5,20 +5,18 @@
 (generate_opam_files true)
 
 (source
- (github username/reponame))
+ (github jamestjw/stockfish_ocaml))
 
-(authors "Author Name")
+(authors "see AUTHORS file")
 
-(maintainers "Maintainer Name")
+(maintainers "James Tan")
 
-(license LICENSE)
-
-(documentation https://url/to/documentation)
+(license GPL-3.0)
 
 (package
  (name stockfish_ocaml)
- (synopsis "A short synopsis")
- (description "A longer description")
+ (synopsis "A rewrite of Stockfish in OCaml")
+ (description "Stockfish is a free and strong UCI chess engine derived from Glaurung 2.1 that analyzes chess positions and computes the optimal moves. This is a rewrite of Stockfish (https://github.com/official-stockfish/Stockfish) in OCaml.")
  (depends
    ocaml
    dune
@@ -26,6 +24,6 @@
    ppx_jane
    ppx_deriving)
  (tags
-  (topics "to describe" your project)))
+  (chess-engine uci chess stockfish)))
 
 ; See the complete stanza docs at https://dune.readthedocs.io/en/stable/dune-files.html#dune-project

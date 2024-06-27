@@ -1,15 +1,15 @@
 opam-version: "2.0"
 name: "stockfish_ocaml"
 version: "~dev"
-synopsis: "A short synopsis"
-description: "A longer description"
-maintainer: "Maintainer Name"
-authors: "Author Name"
-license: "LICENSE"
-tags: ["topics" "to describe" "your" "project"]
-homepage: "https://github.com/username/reponame"
-doc: "https://url/to/documentation"
-bug-reports: "https://github.com/username/reponame/issues"
+synopsis: "A rewrite of Stockfish in OCaml"
+description:
+  "Stockfish is a free and strong UCI chess engine derived from Glaurung 2.1 that analyzes chess positions and computes the optimal moves. This is a rewrite of Stockfish (https://github.com/official-stockfish/Stockfish) in OCaml."
+maintainer: "James Tan"
+authors: "see AUTHORS file"
+license: "GPL-3.0"
+tags: ["chess-engine" "uci" "chess" "stockfish"]
+homepage: "https://github.com/jamestjw/stockfish_ocaml"
+bug-reports: "https://github.com/jamestjw/stockfish_ocaml/issues"
 depends: [
   "base" {= "v0.17.0"}
   "base-bigarray" {= "base"}
@@ -100,4 +100,4 @@ build: [
     "@doc" {with-doc}
   ]
 ]
-dev-repo: "git+https://github.com/username/reponame.git"
+dev-repo: "git+https://github.com/jamestjw/stockfish_ocaml.git"
