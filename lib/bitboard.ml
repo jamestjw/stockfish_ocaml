@@ -27,7 +27,9 @@ module type BITBOARD = sig
   val rank_8 : t
   val square_bb : Types.square -> t
   val bb_and_sq : t -> Types.square -> t
+  val sq_and_bb : Types.square -> t -> t
   val bb_or_sq : t -> Types.square -> t
+  val sq_or_bb : Types.square -> t -> t
   val bb_xor_sq : t -> Types.square -> t
   val more_than_one : t -> bool
   val rank_bb : Types.rank -> t
@@ -64,33 +66,8 @@ module type BITBOARD = sig
   (*
    * Returns true if the squares s1, s2 and s3 are aligned either on a
    * straight or on a diagonal line.
-   * inline bool aligned(Square s1, Square s2, Square s3) { return line_bb(s1, s2) & s3; }
    *)
   val aligned : Types.square -> Types.square -> Types.square -> bool
-
-  (* TODO: Implement this when required
-   *
-   * template<typename T1 = Square>
-   * inline int distance(Square x, Square y);
-   * 
-   * template<>
-   * inline int distance<File>(Square x, Square y) {
-   *     return std::abs(file_of(x) - file_of(y));
-   * }
-   * 
-   * template<>
-   * inline int distance<Rank>(Square x, Square y) {
-   *     return std::abs(rank_of(x) - rank_of(y));
-   * }
-   * 
-   * template<>
-   * inline int distance<Square>(Square x, Square y) {
-   *     return SquareDistance[x][y];
-   * }
-   * 
-   * FIXME: Why is this even in this file?! 
-   * inline int edge_distance(File f) { return std::min(f, File(FILE_H - f)); }
-   *)
   val lsb : t -> t
   val msb : t -> t
   val pop_lsb : t -> t * t
@@ -125,20 +102,13 @@ module Bitboard : BITBOARD = struct
   let rank_7 = UInt64.shift_left rank_1 (8 * 6)
   let rank_8 = UInt64.shift_left rank_1 (8 * 7)
 
-  (* TODO: Implement this
-   * extern uint8_t PopCnt16[1 << 16];
-   * extern uint8_t SquareDistance[SQUARE_NB][SQUARE_NB];
-   * extern Bitboard BetweenBB[SQUARE_NB][SQUARE_NB];
-   * extern Bitboard LineBB[SQUARE_NB][SQUARE_NB];
-   * extern Bitboard PseudoAttacks[PIECE_TYPE_NB][SQUARE_NB];
-   * extern Bitboard PawnAttacks[COLOR_NB][SQUARE_NB];
-   *)
-
   let square_bb sq =
     UInt64.shift_left (UInt64.of_int 1) (Types.square_to_enum sq)
 
   let bb_and_sq bb sq = UInt64.logand bb @@ square_bb sq
+  let sq_and_bb = Fn.flip bb_and_sq
   let bb_or_sq bb sq = UInt64.logor bb @@ square_bb sq
+  let sq_or_bb = Fn.flip bb_or_sq
   let bb_xor_sq bb sq = UInt64.logxor bb @@ square_bb sq
   let bb_not_zero bb = not @@ UInt64.equal bb UInt64.zero
 
@@ -191,19 +161,6 @@ module Bitboard : BITBOARD = struct
     | Types.NORTH_WEST ->
         (*  (bb & ~file_A) << 7 *)
         UInt64.logand bb @@ UInt64.lognot file_A |> Fn.flip UInt64.shift_left 7
-
-  let pawn_attacks_bb colour bb =
-    match colour with
-    | Types.WHITE ->
-        UInt64.logor (shift bb Types.NORTH_EAST) (shift bb Types.NORTH_WEST)
-    | Types.BLACK ->
-        UInt64.logor (shift bb Types.SOUTH_EAST) (shift bb Types.SOUTH_WEST)
-
-  (* TODO: We should cache this in a table or pre-generate this *)
-  let pawn_attacks_bb_from_sq colour sq = square_bb sq |> pawn_attacks_bb colour
-  let line_bb _s1 _s2 = failwith "TODO!"
-  let between_bb _s1 _s2 = failwith "TODO!"
-  let aligned s1 s2 s3 = bb_not_zero @@ bb_and_sq (line_bb s1 s2) s3
 
   let lsb bb =
     (* Instead of doing bb & -bb, we do bb & (~bb + 1) *)
@@ -258,21 +215,20 @@ module Bitboard : BITBOARD = struct
       (Types.rank_to_enum (Types.rank_of_sq sq1)
       - Types.rank_to_enum (Types.rank_of_sq sq2))
 
-  (* TODO: Should this be made lazy? *)
+  let matrix_get matrix i j = Array.get (Array.get matrix i) j
+  let matrix_set matrix i j value = Array.set (Array.get matrix i) j value
+
   let sq_distance_tbl =
     let tbl = Array.make_matrix ~dimx:64 ~dimy:64 0 in
     List.iter ~f:(fun (sq1, sq2) ->
-        Array.set
-          (Array.get tbl (Types.square_to_enum sq1))
-          (Types.square_to_enum sq2)
+        matrix_set tbl (Types.square_to_enum sq1) (Types.square_to_enum sq2)
           (Int.max (distance_by_file sq1 sq2) (distance_by_rank sq1 sq2)))
     @@ List.cartesian_product Types.all_squares Types.all_squares;
 
     tbl
 
   let sq_distance sq1 sq2 =
-    Array.get
-      (Array.get sq_distance_tbl (Types.square_to_enum sq1))
+    matrix_get sq_distance_tbl (Types.square_to_enum sq1)
       (Types.square_to_enum sq2)
 
   (*
@@ -282,9 +238,11 @@ module Bitboard : BITBOARD = struct
   let safe_destination sq step =
     let dst = Types.square_of_enum (Types.square_to_enum sq + step) in
     match dst with
-    (* TODO: Figure out why 2?? *)
-    | Some dst -> if sq_distance sq dst <= 2 then square_bb dst else empty
-    | None -> empty
+    (* 2 because knight moves may switch the rank/file by 2. On the other
+       hand, a valid step in any normal direction never changes the rank/file
+       by 2 or more. *)
+    | Some dst when sq_distance sq dst <= 2 -> square_bb dst
+    | _ -> empty
 
   let sliding_attack pt sq occupied =
     let rec inner (attacks, sq) direction =
@@ -660,29 +618,140 @@ module Bitboard : BITBOARD = struct
   let bishop_magics, bishop_attacks = init_magics Types.BISHOP
   let rook_magics, rook_attacks = init_magics Types.ROOK
 
+  let bishop_attacks_magical sq occupied =
+    let ({ attacks_offset; _ } as magic) =
+      Array.get bishop_magics (Types.square_to_enum sq)
+    in
+    let index = magic_index magic occupied in
+    Array.get bishop_attacks (index + attacks_offset)
+
+  let rook_attacks_magical sq occupied =
+    let ({ attacks_offset; _ } as magic) =
+      Array.get rook_magics (Types.square_to_enum sq)
+    in
+    let index = magic_index magic occupied in
+    Array.get rook_attacks (index + attacks_offset)
+
+  let pawn_attacks_bb colour bb =
+    match colour with
+    | Types.WHITE ->
+        UInt64.logor (shift bb Types.NORTH_EAST) (shift bb Types.NORTH_WEST)
+    | Types.BLACK ->
+        UInt64.logor (shift bb Types.SOUTH_EAST) (shift bb Types.SOUTH_WEST)
+
+  (* Bitboard[2][64] *)
+  let pawn_attacks =
+    let tbl =
+      Array.make_matrix ~dimx:2 ~dimy:(List.length Types.all_squares) empty
+    in
+    List.iter
+      (List.cartesian_product Types.all_squares [ Types.WHITE; Types.BLACK ])
+      ~f:(fun (sq, colour) ->
+        matrix_set tbl
+          (Types.colour_to_enum colour)
+          (Types.square_to_enum sq)
+          (pawn_attacks_bb colour @@ square_bb sq));
+    tbl
+
+  let pawn_attacks_bb_from_sq colour sq =
+    matrix_get pawn_attacks
+      (Types.colour_to_enum colour)
+      (Types.square_to_enum sq)
+
+  (* Bitboard[6][64]
+     Squares that would be attacked by pieces if the board was completely empty. *)
+  let pseudo_attacks =
+    let tbl =
+      Array.make_matrix
+        ~dimx:(List.length Types.all_piece_types)
+        ~dimy:(List.length Types.all_squares)
+        empty
+    in
+    let do_square sq =
+      let sq_enum = Types.square_to_enum sq in
+      (* Setup king moves *)
+      let king_tbl = Array.get tbl (Types.piece_type_to_enum Types.KING) in
+      List.iter Types.all_directions ~f:(fun dir ->
+          Array.set king_tbl sq_enum
+            (UInt64.logor
+               (Array.get king_tbl sq_enum)
+               (safe_destination sq (Types.direction_to_enum dir))));
+
+      let knight_tbl = Array.get tbl (Types.piece_type_to_enum Types.KNIGHT) in
+      (* Setup knight moves *)
+      List.iter Types.all_knight_directions ~f:(fun dir ->
+          Array.set knight_tbl sq_enum
+            (UInt64.logor
+               (Array.get knight_tbl sq_enum)
+               (safe_destination sq (Types.knight_direction_to_enum dir))));
+
+      (* Setup bishop, rook, and queen moves at the same time *)
+      let bishop_attacks = bishop_attacks_magical sq empty in
+      let rook_attacks = rook_attacks_magical sq empty in
+      matrix_set tbl
+        (Types.piece_type_to_enum Types.BISHOP)
+        sq_enum bishop_attacks;
+      matrix_set tbl (Types.piece_type_to_enum Types.ROOK) sq_enum rook_attacks;
+      matrix_set tbl (Types.piece_type_to_enum Types.QUEEN) sq_enum
+      @@ UInt64.logor bishop_attacks rook_attacks
+    in
+    List.iter ~f:do_square Types.all_squares;
+    tbl
+
   let rec attacks_bb pt sq occupied =
     match pt with
-    | Types.BISHOP ->
-        let ({ attacks_offset; _ } as magic) =
-          Array.get bishop_magics (Types.square_to_enum sq)
-        in
-        let index = magic_index magic occupied in
-        Array.get bishop_attacks (index + attacks_offset)
-    | Types.ROOK ->
-        let ({ attacks_offset; _ } as magic) =
-          Array.get rook_magics (Types.square_to_enum sq)
-        in
-        let index = magic_index magic occupied in
-        Array.get rook_attacks (index + attacks_offset)
+    | Types.BISHOP -> bishop_attacks_magical sq occupied
+    | Types.ROOK -> rook_attacks_magical sq occupied
     | Types.QUEEN ->
         UInt64.logor
           (attacks_bb Types.BISHOP sq occupied)
           (attacks_bb Types.ROOK sq occupied)
     | Types.PAWN -> failwith "Not allowed!"
-    | _ -> failwith "not implemented yet"
+    | _ ->
+        matrix_get pseudo_attacks
+          (Types.piece_type_to_enum pt)
+          (Types.square_to_enum sq)
+
+  let line_bb_tbl, between_bb_tbl =
+    let line_bb_tbl = Array.make_matrix ~dimx:64 ~dimy:64 empty in
+    let between_bb_tbl = Array.make_matrix ~dimx:64 ~dimy:64 empty in
+    List.iter ~f:(fun (sq1, sq2) ->
+        let sq1_enum = Types.square_to_enum sq1 in
+        let sq2_enum = Types.square_to_enum sq2 in
+        List.iter
+          ~f:(fun pt ->
+            if
+              bb_not_zero
+              @@ bb_and_sq
+                   (matrix_get pseudo_attacks
+                      (Types.piece_type_to_enum pt)
+                      sq1_enum)
+                   sq2
+            then (
+              matrix_set line_bb_tbl sq1_enum sq2_enum
+              @@ (UInt64.logand (attacks_bb pt sq1 empty)
+                    (attacks_bb pt sq2 empty)
+                 |> sq_or_bb sq1 |> sq_or_bb sq2);
+              matrix_set between_bb_tbl sq1_enum sq2_enum
+              @@ UInt64.logand
+                   (attacks_bb pt sq1 (square_bb sq2))
+                   (attacks_bb pt sq2 (square_bb sq1))))
+          [ Types.BISHOP; Types.ROOK ];
+        matrix_set between_bb_tbl sq1_enum sq2_enum
+        @@ bb_or_sq (matrix_get between_bb_tbl sq1_enum sq2_enum) sq2)
+    @@ List.cartesian_product Types.all_squares Types.all_squares;
+    (line_bb_tbl, between_bb_tbl)
+
+  let line_bb s1 s2 =
+    matrix_get line_bb_tbl (Types.square_to_enum s1) (Types.square_to_enum s2)
+
+  let between_bb s1 s2 =
+    matrix_get between_bb_tbl (Types.square_to_enum s1)
+      (Types.square_to_enum s2)
+
+  let aligned s1 s2 s3 = bb_not_zero @@ bb_and_sq (line_bb s1 s2) s3
 
   (* Test of functions that we are not exposing outside of the module *)
-
   let%test_unit "test_lsb" =
     [%test_result: t] ~expect:(UInt64.of_int 0b0010)
       (lsb @@ UInt64.of_int 0b1010);
@@ -836,9 +905,6 @@ let%test_unit "test_shift" =
     ~expect:(Bitboard.square_bb Types.A4)
     (Bitboard.shift (Bitboard.square_bb Types.B5) Types.SOUTH_WEST)
 
-(* TODO: Implement this after `line_bb` is implemented *)
-let%test_unit "test_aligned" = ()
-
 let%test_unit "test_sq_distance" =
   [%test_result: int] ~expect:4 (Bitboard.sq_distance Types.A1 Types.E4);
   [%test_result: int] ~expect:0 (Bitboard.sq_distance Types.A1 Types.A1);
@@ -851,8 +917,7 @@ let%test_unit "test_magically_get_bishop_attack_empty_board" =
     [ Types.B2; Types.C3; Types.D4; Types.E5; Types.F6; Types.G7; Types.H8 ]
   in
   let expected_bb =
-    List.fold ~init:Bitboard.empty
-      ~f:(fun acc sq -> Bitboard.bb_or_sq acc sq)
+    List.fold ~init:Bitboard.empty ~f:Bitboard.bb_or_sq
       expected_attacked_squares
   in
   [%test_result: Bitboard.t] ~expect:expected_bb attacks
@@ -866,8 +931,7 @@ let%test_unit "test_magically_get_bishop_attack_self_obstruction" =
     [ Types.B2; Types.C3; Types.D4; Types.E5; Types.F6; Types.G7; Types.H8 ]
   in
   let expected_bb =
-    List.fold ~init:Bitboard.empty
-      ~f:(fun acc sq -> Bitboard.bb_or_sq acc sq)
+    List.fold ~init:Bitboard.empty ~f:Bitboard.bb_or_sq
       expected_attacked_squares
   in
   [%test_result: Bitboard.t] ~expect:expected_bb attacks
@@ -877,8 +941,7 @@ let%test_unit "test_sliding_attack_bishop_1_piece_obstructing_diagonal" =
   let attacks = Bitboard.attacks_bb Types.BISHOP Types.A1 occupied in
   let expected_attacked_squares = [ Types.B2; Types.C3; Types.D4 ] in
   let expected_bb =
-    List.fold ~init:Bitboard.empty
-      ~f:(fun acc sq -> Bitboard.bb_or_sq acc sq)
+    List.fold ~init:Bitboard.empty ~f:Bitboard.bb_or_sq
       expected_attacked_squares
   in
   [%test_result: Bitboard.t] ~expect:expected_bb attacks
@@ -890,8 +953,7 @@ let%test_unit "test_sliding_attack_bishop_2_pieces_obstructing_diagonal" =
   let attacks = Bitboard.attacks_bb Types.BISHOP Types.A1 occupied in
   let expected_attacked_squares = [ Types.B2; Types.C3; Types.D4 ] in
   let expected_bb =
-    List.fold ~init:Bitboard.empty
-      ~f:(fun acc sq -> Bitboard.bb_or_sq acc sq)
+    List.fold ~init:Bitboard.empty ~f:Bitboard.bb_or_sq
       expected_attacked_squares
   in
   [%test_result: Bitboard.t] ~expect:expected_bb attacks
@@ -921,8 +983,7 @@ let%test_unit "test_magically_get_rook_attack_empty_board" =
     ]
   in
   let expected_bb =
-    List.fold ~init:Bitboard.empty
-      ~f:(fun acc sq -> Bitboard.bb_or_sq acc sq)
+    List.fold ~init:Bitboard.empty ~f:Bitboard.bb_or_sq
       expected_attacked_squares
   in
   [%test_result: Bitboard.t] ~expect:expected_bb attacks
@@ -952,8 +1013,106 @@ let%test_unit "test_magically_get_rook_attack_1_obstructing_piece" =
     ]
   in
   let expected_bb =
-    List.fold ~init:Bitboard.empty
-      ~f:(fun acc sq -> Bitboard.bb_or_sq acc sq)
+    List.fold ~init:Bitboard.empty ~f:Bitboard.bb_or_sq
       expected_attacked_squares
   in
   [%test_result: Bitboard.t] ~expect:expected_bb attacks
+
+let%test_unit "test_get_king_attacks" =
+  let attacks = Bitboard.attacks_bb Types.KING Types.E4 Bitboard.empty in
+  let expected_bb =
+    List.fold ~init:Bitboard.empty ~f:Bitboard.bb_or_sq
+      [
+        Types.D3;
+        Types.E3;
+        Types.D5;
+        Types.E5;
+        Types.F5;
+        Types.D4;
+        Types.F4;
+        Types.F3;
+      ]
+  in
+  [%test_result: Bitboard.t] ~expect:expected_bb attacks
+
+let%test_unit "test_get_king_attacks_from_corner" =
+  let attacks = Bitboard.attacks_bb Types.KING Types.H8 Bitboard.empty in
+  let expected_bb =
+    List.fold ~init:Bitboard.empty ~f:Bitboard.bb_or_sq
+      [ Types.H7; Types.G8; Types.G7 ]
+  in
+  [%test_result: Bitboard.t] ~expect:expected_bb attacks
+
+let%test_unit "test_get_knight_attacks" =
+  let attacks = Bitboard.attacks_bb Types.KNIGHT Types.E3 Bitboard.empty in
+  let expected_bb =
+    List.fold ~init:Bitboard.empty ~f:Bitboard.bb_or_sq
+      [
+        Types.D5;
+        Types.F5;
+        Types.G4;
+        Types.G2;
+        Types.F1;
+        Types.D1;
+        Types.C2;
+        Types.C4;
+      ]
+  in
+  [%test_result: Bitboard.t] ~expect:expected_bb attacks
+
+let%test_unit "test_get_knight_from_the_rim" =
+  let attacks = Bitboard.attacks_bb Types.KNIGHT Types.A3 Bitboard.empty in
+  let expected_bb =
+    List.fold ~init:Bitboard.empty ~f:Bitboard.bb_or_sq
+      [ Types.B5; Types.C4; Types.C2; Types.B1 ]
+  in
+  [%test_result: Bitboard.t] ~expect:expected_bb attacks
+
+let%test_unit "test_line_bb_diagonal" =
+  let expected =
+    List.fold ~init:Bitboard.empty ~f:Bitboard.bb_or_sq
+      [ Types.A2; Types.B3; Types.C4; Types.D5; Types.E6; Types.F7; Types.G8 ]
+  in
+  [%test_result: Bitboard.t] ~expect:expected
+    (Bitboard.line_bb Types.C4 Types.F7)
+
+let%test_unit "test_line_bb_vertical" =
+  let expected =
+    List.fold ~init:Bitboard.empty ~f:Bitboard.bb_or_sq
+      [
+        Types.A1;
+        Types.A2;
+        Types.A3;
+        Types.A4;
+        Types.A5;
+        Types.A6;
+        Types.A7;
+        Types.A8;
+      ]
+  in
+  [%test_result: Bitboard.t] ~expect:expected
+    (Bitboard.line_bb Types.A4 Types.A2)
+
+let%test_unit "test_between_bb_diagonal" =
+  let expected =
+    List.fold ~init:Bitboard.empty ~f:Bitboard.bb_or_sq
+      [ Types.D5; Types.E6; Types.F7 ]
+  in
+  [%test_result: Bitboard.t] ~expect:expected
+    (Bitboard.between_bb Types.C4 Types.F7)
+
+let%test_unit "test_between_bb_horizontal" =
+  let expected =
+    List.fold ~init:Bitboard.empty ~f:Bitboard.bb_or_sq
+      [ Types.F2; Types.E2; Types.D2; Types.C2; Types.B2; Types.A2 ]
+  in
+  [%test_result: Bitboard.t] ~expect:expected
+    (Bitboard.between_bb Types.G2 Types.A2)
+
+let%test_unit "test_aligned" =
+  [%test_result: bool] ~expect:true
+    (Bitboard.aligned Types.E4 Types.F5 Types.G6);
+  [%test_result: bool] ~expect:true
+    (Bitboard.aligned Types.E4 Types.E5 Types.E6);
+  [%test_result: bool] ~expect:false
+    (Bitboard.aligned Types.E4 Types.E5 Types.F6)

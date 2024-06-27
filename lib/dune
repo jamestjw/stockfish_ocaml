@@ -1,6 +1,6 @@
 (library
  (name stockfish_ocaml)
- (libraries base integers )
+ (libraries base integers)
  (inline_tests)
  (preprocess
   (pps

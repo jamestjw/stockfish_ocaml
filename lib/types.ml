@@ -20,7 +20,7 @@ open Base
 
 (* TODO: Make a module out of this to prevent exposing unnecessary details *)
 module Types = struct
-  type colour = WHITE | BLACK
+  type colour = WHITE | BLACK [@@deriving enum]
 
   let other_colour = function WHITE -> BLACK | BLACK -> WHITE
 
@@ -60,6 +60,8 @@ module Types = struct
      it be nicer to represent the absence of pieces using a None? *)
   type piece_type = PAWN | KNIGHT | BISHOP | ROOK | QUEEN | KING
   [@@deriving enum, sexp, ord, show]
+
+  let all_piece_types = [ PAWN; KNIGHT; BISHOP; ROOK; QUEEN; KING ]
 
   (* TODO: Check if the fancy integer arithmetic here is really necessary.
      Probably not actually| the point of this rewrite is to eliminate all the weird C++ stuff. *)
@@ -234,6 +236,9 @@ module Types = struct
     | SOUTH_WEST
     | NORTH_WEST
 
+  let all_directions =
+    [ NORTH; EAST; SOUTH; WEST; NORTH_EAST; SOUTH_EAST; SOUTH_WEST; NORTH_WEST ]
+
   let direction_to_enum = function
     | NORTH -> 8
     | EAST -> 1
@@ -253,6 +258,51 @@ module Types = struct
     | -9 -> SOUTH_WEST
     | 7 -> NORTH_WEST
     | _ -> failwith "Invalid direction"
+
+  (* for (int step : {-17, -15, -10, -6, 6, 10, 15, 17}) *)
+
+  type knight_direction =
+    | SOUTH_SOUTH_EAST
+    | SOUTH_SOUTH_WEST
+    | SOUTH_WEST_WEST
+    | SOUTH_EAST_EAST
+    | NORTH_NORTH_WEST
+    | NORTH_NORTH_EAST
+    | NORTH_EAST_EAST
+    | NORTH_WEST_WEST
+
+  let all_knight_directions =
+    [
+      SOUTH_SOUTH_EAST;
+      SOUTH_SOUTH_WEST;
+      SOUTH_WEST_WEST;
+      SOUTH_EAST_EAST;
+      NORTH_NORTH_WEST;
+      NORTH_NORTH_EAST;
+      NORTH_EAST_EAST;
+      NORTH_WEST_WEST;
+    ]
+
+  let knight_direction_to_enum = function
+    | SOUTH_SOUTH_EAST -> -17
+    | SOUTH_SOUTH_WEST -> -15
+    | SOUTH_WEST_WEST -> -10
+    | SOUTH_EAST_EAST -> -6
+    | NORTH_NORTH_WEST -> 15
+    | NORTH_NORTH_EAST -> 17
+    | NORTH_EAST_EAST -> 10
+    | NORTH_WEST_WEST -> 6
+
+  let knight_direction_of_enum = function
+    | -17 -> SOUTH_SOUTH_EAST
+    | -15 -> SOUTH_SOUTH_WEST
+    | -10 -> SOUTH_WEST_WEST
+    | -6 -> SOUTH_EAST_EAST
+    | 15 -> NORTH_NORTH_WEST
+    | 17 -> NORTH_NORTH_EAST
+    | 10 -> NORTH_EAST_EAST
+    | 6 -> NORTH_WEST_WEST
+    | _ -> failwith "Invalid knight direction"
 
   type file =
     | FILE_A
