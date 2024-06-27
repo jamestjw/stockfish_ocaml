@@ -44,12 +44,16 @@ module type BITBOARD = sig
   val rank_7 : t
   val rank_8 : t
   val square_bb : Types.square -> t
+  val bb_and : t -> t -> t
+  val bb_or : t -> t -> t
+  val bb_xor : t -> t -> t
   val bb_and_sq : t -> Types.square -> t
   val sq_and_bb : Types.square -> t -> t
   val bb_or_sq : t -> Types.square -> t
   val sq_or_bb : Types.square -> t -> t
   val bb_xor_sq : t -> Types.square -> t
   val more_than_one : t -> bool
+  val bb_not_zero : t -> bool
   val rank_bb : Types.rank -> t
   val rank_bb_of_sq : Types.square -> t
   val file_bb : Types.file -> t
@@ -91,6 +95,9 @@ module type BITBOARD = sig
   val pop_lsb : t -> t * t
   val sq_distance : Types.square -> Types.square -> int
   val attacks_bb : Types.piece_type -> Types.square -> t -> t
+
+  (* Takes a bitboard containing a single set bit and transforms it to a square *)
+  val bb_to_square : t -> Types.square
 end
 
 module Bitboard : BITBOARD = struct
@@ -123,6 +130,9 @@ module Bitboard : BITBOARD = struct
   let square_bb sq =
     UInt64.shift_left (UInt64.of_int 1) (Types.square_to_enum sq)
 
+  let bb_and = UInt64.logand
+  let bb_or = UInt64.logor
+  let bb_xor = UInt64.logxor
   let bb_and_sq bb sq = UInt64.logand bb @@ square_bb sq
   let sq_and_bb = Fn.flip bb_and_sq
   let bb_or_sq bb sq = UInt64.logor bb @@ square_bb sq
@@ -198,6 +208,16 @@ module Bitboard : BITBOARD = struct
   let pop_lsb bb =
     let lsb = lsb bb in
     (lsb, UInt64.logand bb @@ UInt64.lognot lsb)
+
+  let bb_to_square bb =
+    let rec log_2 n =
+      if UInt64.compare n UInt64.one > 0 then
+        UInt64.shift_right n 1 |> log_2 |> UInt64.succ
+      else UInt64.zero
+    in
+    assert (not @@ more_than_one bb);
+    assert (bb_not_zero bb);
+    log_2 bb |> UInt64.to_int |> Types.square_of_enum |> Stdlib.Option.get
 
   let show bb =
     let res =
@@ -1134,3 +1154,10 @@ let%test_unit "test_aligned" =
     (Bitboard.aligned Types.E4 Types.E5 Types.E6);
   [%test_result: bool] ~expect:false
     (Bitboard.aligned Types.E4 Types.E5 Types.F6)
+
+let%test_unit "test_bb_to_square" =
+  List.iter
+    ~f:(fun sq ->
+      [%test_result: Types.square] ~expect:sq
+        (Bitboard.square_bb sq |> Bitboard.bb_to_square))
+    Types.all_squares

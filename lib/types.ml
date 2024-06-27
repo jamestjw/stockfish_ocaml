@@ -25,7 +25,13 @@ module Types = struct
   let other_colour = function WHITE -> BLACK | BLACK -> WHITE
 
   (* TODO: We can represent this as a bit-wise enum when we need it. *)
-  type castling_rights = WHITE_OO | WHITE_OOO | BLACK_OO | BLACK_OOO
+  type castling_right =
+    | NO_CASTLING
+    | WHITE_OO
+    | WHITE_OOO
+    | BLACK_OO
+    | BLACK_OOO
+  [@@deriving enum]
 
   (* Value represents a search value. The values used in search are always
    * supposed to be in the range (-value_none| value_none] and should not
@@ -336,6 +342,9 @@ module Types = struct
   let sq_plus_dir sq dir =
     square_to_enum sq + direction_to_enum dir |> square_of_enum
 
+  let sq_sub_dir sq dir =
+    square_to_enum sq - direction_to_enum dir |> square_of_enum
+
   (* Swap A1 <-> A8 *)
   let flip_sq_rank sq =
     Int.bit_xor (square_to_enum sq) (square_to_enum A8)
@@ -374,6 +383,20 @@ module Types = struct
     | BLACK, ROOK -> B_ROOK
     | BLACK, QUEEN -> B_QUEEN
     | BLACK, KING -> B_KING
+
+  let type_of_piece = function
+    | W_PAWN -> PAWN
+    | W_KNIGHT -> KNIGHT
+    | W_BISHOP -> BISHOP
+    | W_ROOK -> ROOK
+    | W_QUEEN -> QUEEN
+    | W_KING -> KING
+    | B_PAWN -> PAWN
+    | B_KNIGHT -> KNIGHT
+    | B_BISHOP -> BISHOP
+    | B_ROOK -> ROOK
+    | B_QUEEN -> QUEEN
+    | B_KING -> KING
 
   let color_of_piece = function
     | W_PAWN -> WHITE
@@ -422,7 +445,7 @@ module Types = struct
   let pawn_push_direction = function WHITE -> NORTH | BLACK -> SOUTH
 
   type move_type = NORMAL | PROMOTION | EN_PASSANT | CASTLING
-  [@@deriving enum, ord, sexp]
+  [@@deriving enum, ord, eq, sexp]
 
   type move = int
 
