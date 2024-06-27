@@ -33,6 +33,9 @@ module Types = struct
     | BLACK_OOO
   [@@deriving enum]
 
+  let all_castling_rights =
+    [ NO_CASTLING; WHITE_OO; WHITE_OOO; BLACK_OO; BLACK_OOO ]
+
   (* Value represents a search value. The values used in search are always
    * supposed to be in the range (-value_none| value_none] and should not
    * exceed this range. *)
@@ -85,6 +88,22 @@ module Types = struct
     | B_QUEEN
     | B_KING
   [@@deriving enum]
+
+  let all_pieces =
+    [
+      W_PAWN;
+      W_KNIGHT;
+      W_BISHOP;
+      W_ROOK;
+      W_QUEEN;
+      W_KING;
+      B_PAWN;
+      B_KNIGHT;
+      B_BISHOP;
+      B_ROOK;
+      B_QUEEN;
+      B_KING;
+    ]
 
   let piece_value = function
     | W_PAWN | B_PAWN -> pawn_value

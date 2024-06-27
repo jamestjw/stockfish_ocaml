@@ -1,7 +1,26 @@
+(*
+ *   Stockfish, a UCI chess playing engine derived from Glaurung 2.1
+ *   Copyright (C) 2004-2024 The Stockfish developers (see AUTHORS file)
+ *
+ *   Stockfish is free software: you can redistribute it and/or modify
+ *   it under the terms of the GNU General Public License as published by
+ *   the Free Software Foundation, either version 3 of the License, or
+ *   (at your option) any later version.
+ *
+ *   Stockfish is distributed in the hope that it will be useful,
+ *   but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *   GNU General Public License for more details.
+ *
+ *   You should have received a copy of the GNU General Public License
+ *   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *)
+
 open Base
 open Bitboard
 open Types
 open Unsigned
+open Utils
 
 module Position = struct
   type key = UInt64.t
@@ -228,7 +247,7 @@ module Position = struct
 
         Array.set piece_count piece_enum
           (Int.pred (Array.get piece_count piece_enum))
-    | None -> failwith "Removing inexistant piece"
+    | None -> failwith "Removing nonexistent piece"
 
   let move_piece { board; by_type_bb; by_colour_bb; _ } src dst =
     match Array.get board (Types.square_to_enum src) with
@@ -247,5 +266,59 @@ module Position = struct
 
         Array.set board (Types.square_to_enum src) None;
         Array.set board (Types.square_to_enum dst) (Some piece)
-    | None -> failwith "Moving inexistant piece"
+    | None -> failwith "Moving nonexistent piece"
+
+  (*
+   * Implements Marcel van Kervinck's cuckoo algorithm to detect repetition of positions
+   * for 3-fold repetition draws. The algorithm uses two hash tables with Zobrist hashes
+   * to allow fast detection of recurring positions. For details see:
+   * http://web.archive.org/web/20201107002606/https://marcelk.net/2013-04-06/paper/upcoming-rep-v2.pdf
+   *)
+
+  type zobrist = {
+    psq : key array array;
+    en_passant : key array;
+    castling : key array;
+    side : key;
+    no_pawns : key;
+  }
+
+  (* First and second hash functions for indexing the cuckoo tables *)
+  (*  h & 0x1fff *)
+  let h1 h = UInt64.logand h @@ UInt64.of_int 0x1fff
+
+  (* (h >> 16) & 0x1fff *)
+  let h2 h = UInt64.shift_right h 16 |> UInt64.logand @@ UInt64.of_int 0x1fff
+
+  (* Cuckoo tables with Zobrist hashes of valid reversible moves, and the moves themselves *)
+  let cuckoo = Array.create ~len:8192 UInt64.zero
+  let cuckooMove = Array.create ~len:8192 Types.none_move
+
+  let zobrist_data =
+    Random.init 42;
+    let gen_uint64 () = Random.bits64 () |> UInt64.of_int64 in
+    let psq =
+      Array.make_matrix
+        ~dimx:(List.length Types.all_pieces)
+        ~dimy:(List.length Types.all_squares)
+        UInt64.zero
+    in
+    let en_passant =
+      Array.create ~len:(List.length Types.all_files) UInt64.zero
+    in
+    let castling =
+      Array.create ~len:(List.length Types.all_castling_rights) UInt64.zero
+    in
+    let side = gen_uint64 () in
+    let no_pawns = gen_uint64 () in
+    List.iter (List.cartesian_product Types.all_pieces Types.all_squares)
+      ~f:(fun (piece, sq) ->
+        matrix_set psq
+          (Types.piece_to_enum piece)
+          (Types.square_to_enum sq) (gen_uint64 ()));
+    List.iter Types.all_files ~f:(fun file ->
+        Array.set en_passant (Types.file_to_enum file) (gen_uint64 ()));
+    List.iter Types.all_castling_rights ~f:(fun cr ->
+        Array.set castling (Types.castling_right_to_enum cr) (gen_uint64 ()));
+    { psq; en_passant; castling; side; no_pawns }
 end

@@ -19,6 +19,7 @@
 open Base
 open Unsigned
 open Types
+open Utils
 
 module type BITBOARD = sig
   type t
@@ -252,9 +253,6 @@ module Bitboard : BITBOARD = struct
     Int.abs
       (Types.rank_to_enum (Types.rank_of_sq sq1)
       - Types.rank_to_enum (Types.rank_of_sq sq2))
-
-  let matrix_get matrix i j = Array.get (Array.get matrix i) j
-  let matrix_set matrix i j value = Array.set (Array.get matrix i) j value
 
   let sq_distance_tbl =
     let tbl = Array.make_matrix ~dimx:64 ~dimy:64 0 in
