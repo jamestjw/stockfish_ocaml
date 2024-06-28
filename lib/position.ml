@@ -546,6 +546,7 @@ module Position = struct
 
   let attackers_to_sq pos sq = attackers_to_occupied pos sq (pieces pos)
 
+  (* TODO: Unit test this *)
   let set_state ({ st_list; side_to_move; piece_count; _ } as pos) =
     let rec do_pieces pieces_bb (key, pawn_key, white_npm, black_npm) =
       if Bitboard.bb_not_zero pieces_bb then
@@ -629,6 +630,7 @@ module Position = struct
         }
     | [] -> failwith "Missing state info"
 
+  (* TODO: Unit test this *)
   let legal ({ side_to_move = us; chess960; _ } as pos) m =
     assert (Types.move_is_ok m);
     let src = Types.move_src m in
@@ -728,6 +730,111 @@ module Position = struct
          the king and the pinner. *)
       Bitboard.bb_and_sq (blockers_for_king pos us) src |> Bitboard.bb_is_empty
       || Bitboard.aligned src dst (square_of_pt_and_colour pos Types.KING us)
+
+  (* Takes a random move and tests whether the move is
+     pseudo-legal. It is used to validate moves from TT that can be corrupted
+     due to SMP concurrent access or hash position key aliasing. *)
+  (* TODO: This huge function must be unit tested *)
+  let pseudo_legal ({ side_to_move = us; _ } as pos) m =
+    let them = Types.other_colour us in
+    let src = Types.move_src m in
+    let dst = Types.move_dst m in
+    let our_pieces = pieces_of_colour pos them in
+    let their_pieces = pieces_of_colour pos them in
+    let all_pieces = pieces pos in
+    (* TODO: Figure out if null-moves may be passed to this fn. *)
+    let piece = moved_piece pos m in
+
+    (* Use a slower but simpler function for uncommon cases
+       yet we skip the legality check of MoveList<LEGAL>(). *)
+    if not @@ Types.equal_move_type (Types.get_move_type m) Types.NORMAL then
+      failwith "TODO: Implement this after move generation is done"
+    else (
+      (* We know this is not a promotion, hence `ppt` should be None *)
+      assert (Types.get_ppt m |> Option.is_none);
+      match piece with
+      | None -> false (* If there is no piece, the move is definitely illegal *)
+      | Some piece ->
+          let piece_type = Types.type_of_piece piece in
+          (* If the moved piece doesn't belong to the side to move *)
+          if not @@ Types.equal_colour us @@ Types.color_of_piece piece then
+            false
+            (* If the destination square is occupied by a friendly piece *)
+          else if Bitboard.bb_not_zero (Bitboard.bb_and_sq our_pieces dst) then
+            false
+          else if
+            (* Handle pawn moves:
+               1. This can't be a promotion, hence the destination cannot be
+               on the 1st and last ranks *)
+            Types.equal_piece_type piece_type Types.PAWN
+            && Bitboard.bb_not_zero
+                 (Bitboard.bb_or Bitboard.rank_8 Bitboard.rank_1
+                 |> Bitboard.sq_and_bb dst)
+          then false
+          else if
+            (* 2. It must be either a capture, a single push, or double push *)
+            Types.equal_piece_type piece_type Types.PAWN
+            (* Not a capture *)
+            && Bitboard.bb_is_empty
+                 (Bitboard.pawn_attacks_bb_from_sq us src
+                 |> Bitboard.bb_and their_pieces
+                 |> Bitboard.sq_and_bb dst)
+            (* Not a single push *)
+            && (not
+                  (Types.equal_square
+                     (Types.sq_plus_dir src (Types.pawn_push_direction us)
+                     |> Stdlib.Option.get)
+                     dst
+                  && is_empty pos dst))
+            (* Not a double push *)
+            && not
+                 (Types.equal_square
+                    (Types.sq_plus_dir_twice src (Types.pawn_push_direction us)
+                    |> Stdlib.Option.get)
+                    dst
+                 (* Verify that pawn is on starting rank *)
+                 && Types.equal_rank Types.RANK_2
+                    @@ Types.relative_rank_of_sq us src
+                 (* Verify that both squares in front of the pawn are empty *)
+                 && is_empty pos dst
+                 && is_empty pos
+                      (Types.sq_sub_dir dst (Types.pawn_push_direction us)
+                      |> Stdlib.Option.get))
+          then false
+          else if
+            (* If its not a pawn, then the destination square must be a
+               square that it attacks. *)
+            (not @@ Types.equal_piece_type piece_type Types.PAWN)
+            && Bitboard.bb_is_empty
+                 (Bitboard.attacks_bb_occupied piece_type src all_pieces
+                 |> Bitboard.sq_and_bb dst)
+          then false
+            (* Evasions generator already takes care to avoid some kind of
+               illegal moves and legal() relies on this. We therefore have
+               to take care that the same kind of moves are filtered out
+               here. *)
+          else if Bitboard.bb_not_zero @@ checkers pos then
+            let checkers' = checkers pos in
+            if not @@ Types.equal_piece_type Types.KING piece_type then
+              (* There is more than one checker, hence moving the king
+                 cannot be legal. *)
+              if Bitboard.more_than_one checkers' then false
+              else
+                (* Since we are not moving the king, we must either capture
+                   the attacker or interpose the check. *)
+                Bitboard.bb_not_zero
+                  (Bitboard.between_bb
+                     (square_of_pt_and_colour pos Types.KING us)
+                     (Bitboard.lsb checkers' |> Bitboard.bb_to_square)
+                  |> Bitboard.sq_and_bb dst)
+            else
+              (* Ensure that we are not moving the king to another attacked
+                 square. *)
+              Bitboard.bb_is_empty
+                (attackers_to_occupied pos dst
+                   (Bitboard.bb_xor_sq all_pieces src)
+                |> Bitboard.bb_and their_pieces)
+          else true)
 end
 
 let%test_unit "dummy_test" = ()

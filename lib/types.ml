@@ -358,7 +358,7 @@ module Types = struct
     | RANK_6
     | RANK_7
     | RANK_8
-  [@@deriving enum, sexp, ord]
+  [@@deriving enum, sexp, ord, eq]
 
   let all_ranks =
     [ RANK_1; RANK_2; RANK_3; RANK_4; RANK_5; RANK_6; RANK_7; RANK_8 ]
@@ -366,6 +366,11 @@ module Types = struct
   (* TODO: This needs to do more checks, e.g. H4 + EAST should be invalid *)
   let sq_plus_dir sq dir =
     square_to_enum sq + direction_to_enum dir |> square_of_enum
+
+  let sq_plus_dir_twice sq dir =
+    match sq_plus_dir sq dir with
+    | Some res -> sq_plus_dir res dir
+    | None -> None
 
   let sq_sub_dir sq dir =
     square_to_enum sq - direction_to_enum dir |> square_of_enum
