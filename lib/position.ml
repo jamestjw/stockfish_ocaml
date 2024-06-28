@@ -161,8 +161,9 @@ module Position = struct
   let pinners { st_list; _ } colour =
     Array.get (List.hd_exn st_list).pinners @@ Types.colour_to_enum colour
 
-  let check_squares { st_list; _ } colour =
-    Array.get (List.hd_exn st_list).check_squares @@ Types.colour_to_enum colour
+  (* Get squares from which we would check the enemy king *)
+  let check_squares { st_list; _ } pt =
+    Array.get (List.hd_exn st_list).check_squares @@ Types.piece_type_to_enum pt
 
   (* Based on a congruential pseudo-random number generator *)
   let make_key seed =
@@ -835,6 +836,94 @@ module Position = struct
                    (Bitboard.bb_xor_sq all_pieces src)
                 |> Bitboard.bb_and their_pieces)
           else true)
+
+  (* Tests whether a pseudo-legal move gives a check *)
+  (* TODO: Unit test this *)
+  let gives_check ({ side_to_move = us; _ } as pos) m =
+    assert (Types.move_is_ok m);
+
+    match moved_piece pos m with
+    | None -> failwith "Move source contains no piece"
+    | Some piece -> (
+        let pt = Types.type_of_piece piece in
+        let src = Types.move_src m in
+        let dst = Types.move_dst m in
+        let them = Types.other_colour us in
+        let their_king_sq = square_of_pt_and_colour pos Types.KING them in
+        assert (Types.equal_colour us @@ Types.color_of_piece piece);
+
+        (* Direct check? i.e. the piece moves to a square where it
+           checks the enemy king. *)
+        if Bitboard.bb_not_zero (check_squares pos pt |> Bitboard.sq_and_bb dst)
+        then true
+          (* Discovered check? If the enemy king's blocker moves away from
+             the ray so it no longer shields the king. *)
+        else if
+          Bitboard.bb_not_zero
+            (blockers_for_king pos them |> Bitboard.sq_and_bb src)
+        then
+          (* If the piece is no longer aligned with the enemy king OR
+             the moved piece is a KING and he is castling away. Now, for
+             the king to be the shield of a discovered check, it must mean
+             that the enemy king is on the same rank as the other king, and
+             is shielding a check from the rook, hence, castling would
+             definitely deliver a check. *)
+          (not @@ Bitboard.aligned src dst their_king_sq)
+          || (Types.equal_move_type Types.CASTLING @@ Types.get_move_type m)
+        else
+          match Types.get_move_type m with
+          (* We already checked all possible ways for a normal move to deliver
+             check *)
+          | Types.NORMAL -> false
+          | Types.PROMOTION ->
+              (* Will a newly promoted piece directly attack the king? *)
+              Bitboard.bb_not_zero
+                (Bitboard.attacks_bb_occupied
+                   (Stdlib.Option.get @@ Types.get_ppt m)
+                   dst
+                   (pieces pos |> Bitboard.sq_xor_bb src)
+                |> Bitboard.sq_and_bb their_king_sq)
+          | Types.EN_PASSANT ->
+              (* We have already handled the normal checks, here we just need
+                 to see if the removal of the captured pawn delivers a discovered
+                 check. *)
+              let cap_sq =
+                Types.mk_square ~file:(Types.file_of_sq dst)
+                  ~rank:(Types.rank_of_sq src)
+              in
+              let b =
+                pieces pos |> Bitboard.sq_xor_bb src
+                |> Bitboard.sq_xor_bb cap_sq |> Bitboard.sq_or_bb dst
+              in
+              Bitboard.bb_or
+                (Bitboard.attacks_bb_occupied Types.ROOK their_king_sq b
+                |> Bitboard.bb_and
+                     (pieces_of_colour_and_pts pos us
+                        [ Types.QUEEN; Types.ROOK ]))
+                (Bitboard.attacks_bb_occupied Types.BISHOP their_king_sq b
+                |> Bitboard.bb_and
+                     (pieces_of_colour_and_pts pos us
+                        [ Types.QUEEN; Types.BISHOP ]))
+              |> Bitboard.bb_not_zero
+          | Types.CASTLING ->
+              (* We have the KING on the src sq and the ROOK on the dst sq,
+                 we just need to determine if a ROOK on its new square would
+                 be a check. *)
+              let rook_dst =
+                (* Essentially checking if the ROOK is on the right of the
+                   KING *)
+                Types.relative_sq us
+                  (if Types.compare_square dst src > 0 then Types.F1
+                   else Types.D1)
+              in
+              check_squares pos Types.ROOK
+              |> Bitboard.sq_and_bb rook_dst
+              |> Bitboard.bb_not_zero)
+
+  (* Makes a move, and saves all information necessary
+     to a StateInfo object. The move is assumed to be legal. Pseudo-legal
+     moves should be filtered out before this function is called. *)
+  let do_move pos m new_st gives_check = ()
 end
 
 let%test_unit "dummy_test" = ()
