@@ -48,13 +48,16 @@ module type BITBOARD = sig
   val bb_and : t -> t -> t
   val bb_or : t -> t -> t
   val bb_xor : t -> t -> t
+  val bb_not : t -> t
   val bb_and_sq : t -> Types.square -> t
   val sq_and_bb : Types.square -> t -> t
   val bb_or_sq : t -> Types.square -> t
   val sq_or_bb : Types.square -> t -> t
   val bb_xor_sq : t -> Types.square -> t
+  val sq_xor_bb : Types.square -> t -> t
   val more_than_one : t -> bool
   val bb_not_zero : t -> bool
+  val bb_is_empty : t -> bool
   val rank_bb : Types.rank -> t
   val rank_bb_of_sq : Types.square -> t
   val file_bb : Types.file -> t
@@ -95,7 +98,8 @@ module type BITBOARD = sig
   val msb : t -> t
   val pop_lsb : t -> t * t
   val sq_distance : Types.square -> Types.square -> int
-  val attacks_bb : Types.piece_type -> Types.square -> t -> t
+  val attacks_bb : Types.piece_type -> Types.square -> t
+  val attacks_bb_occupied : Types.piece_type -> Types.square -> t -> t
 
   (* Takes a bitboard containing a single set bit and transforms it to a square *)
   val bb_to_square : t -> Types.square
@@ -134,12 +138,15 @@ module Bitboard : BITBOARD = struct
   let bb_and = UInt64.logand
   let bb_or = UInt64.logor
   let bb_xor = UInt64.logxor
+  let bb_not = UInt64.lognot
   let bb_and_sq bb sq = UInt64.logand bb @@ square_bb sq
   let sq_and_bb = Fn.flip bb_and_sq
   let bb_or_sq bb sq = UInt64.logor bb @@ square_bb sq
   let sq_or_bb = Fn.flip bb_or_sq
   let bb_xor_sq bb sq = UInt64.logxor bb @@ square_bb sq
+  let sq_xor_bb = Fn.flip bb_xor_sq
   let bb_not_zero bb = not @@ UInt64.equal bb UInt64.zero
+  let bb_is_empty bb = UInt64.equal bb UInt64.zero
 
   (* b & (b - 1) pops the least significant bit, so if the result is not zero
      then there was more than 1 bit in the original bb *)
@@ -734,14 +741,20 @@ module Bitboard : BITBOARD = struct
     List.iter ~f:do_square Types.all_squares;
     tbl
 
-  let rec attacks_bb pt sq occupied =
+  let attacks_bb pt sq =
+    assert (not @@ Types.equal_piece_type pt Types.PAWN);
+    matrix_get pseudo_attacks
+      (Types.piece_type_to_enum pt)
+      (Types.square_to_enum sq)
+
+  let rec attacks_bb_occupied pt sq occupied =
     match pt with
     | Types.BISHOP -> bishop_attacks_magical sq occupied
     | Types.ROOK -> rook_attacks_magical sq occupied
     | Types.QUEEN ->
         UInt64.logor
-          (attacks_bb Types.BISHOP sq occupied)
-          (attacks_bb Types.ROOK sq occupied)
+          (attacks_bb_occupied Types.BISHOP sq occupied)
+          (attacks_bb_occupied Types.ROOK sq occupied)
     | Types.PAWN -> failwith "Not allowed!"
     | _ ->
         matrix_get pseudo_attacks
@@ -765,13 +778,14 @@ module Bitboard : BITBOARD = struct
                    sq2
             then (
               matrix_set line_bb_tbl sq1_enum sq2_enum
-              @@ (UInt64.logand (attacks_bb pt sq1 empty)
-                    (attacks_bb pt sq2 empty)
+              @@ (UInt64.logand
+                    (attacks_bb_occupied pt sq1 empty)
+                    (attacks_bb_occupied pt sq2 empty)
                  |> sq_or_bb sq1 |> sq_or_bb sq2);
               matrix_set between_bb_tbl sq1_enum sq2_enum
               @@ UInt64.logand
-                   (attacks_bb pt sq1 (square_bb sq2))
-                   (attacks_bb pt sq2 (square_bb sq1))))
+                   (attacks_bb_occupied pt sq1 (square_bb sq2))
+                   (attacks_bb_occupied pt sq2 (square_bb sq1))))
           [ Types.BISHOP; Types.ROOK ];
         matrix_set between_bb_tbl sq1_enum sq2_enum
         @@ bb_or_sq (matrix_get between_bb_tbl sq1_enum sq2_enum) sq2)
@@ -913,6 +927,17 @@ module Bitboard : BITBOARD = struct
     [%test_result: t] ~expect:expected_bb attacks
 end
 
+(* TODO: Embed this in the Bitboard module *)
+module BitboardInfix = struct
+  open Bitboard
+
+  type t = Bitboard.t
+
+  let ( & ) = bb_and
+  let ( || ) = bb_or
+  let ( ^ ) = bb_xor
+end
+
 let%test_unit "test_more_than_one" =
   [%test_result: bool] ~expect:false
     (Bitboard.more_than_one @@ Bitboard.square_bb Types.E4);
@@ -948,7 +973,9 @@ let%test_unit "test_sq_distance" =
   [%test_result: int] ~expect:7 (Bitboard.sq_distance Types.H2 Types.A8)
 
 let%test_unit "test_magically_get_bishop_attack_empty_board" =
-  let attacks = Bitboard.attacks_bb Types.BISHOP Types.A1 Bitboard.empty in
+  let attacks =
+    Bitboard.attacks_bb_occupied Types.BISHOP Types.A1 Bitboard.empty
+  in
   let expected_attacked_squares =
     [ Types.B2; Types.C3; Types.D4; Types.E5; Types.F6; Types.G7; Types.H8 ]
   in
@@ -961,7 +988,8 @@ let%test_unit "test_magically_get_bishop_attack_empty_board" =
 let%test_unit "test_magically_get_bishop_attack_self_obstruction" =
   (* Proof that self obstruction doesn't matter *)
   let attacks =
-    Bitboard.attacks_bb Types.BISHOP Types.A1 (Bitboard.square_bb Types.A1)
+    Bitboard.attacks_bb_occupied Types.BISHOP Types.A1
+      (Bitboard.square_bb Types.A1)
   in
   let expected_attacked_squares =
     [ Types.B2; Types.C3; Types.D4; Types.E5; Types.F6; Types.G7; Types.H8 ]
@@ -974,7 +1002,7 @@ let%test_unit "test_magically_get_bishop_attack_self_obstruction" =
 
 let%test_unit "test_sliding_attack_bishop_1_piece_obstructing_diagonal" =
   let occupied = Bitboard.square_bb Types.D4 in
-  let attacks = Bitboard.attacks_bb Types.BISHOP Types.A1 occupied in
+  let attacks = Bitboard.attacks_bb_occupied Types.BISHOP Types.A1 occupied in
   let expected_attacked_squares = [ Types.B2; Types.C3; Types.D4 ] in
   let expected_bb =
     List.fold ~init:Bitboard.empty ~f:Bitboard.bb_or_sq
@@ -986,7 +1014,7 @@ let%test_unit "test_sliding_attack_bishop_2_pieces_obstructing_diagonal" =
   let occupied =
     Bitboard.square_bb Types.D4 |> Fn.flip Bitboard.bb_or_sq Types.E5
   in
-  let attacks = Bitboard.attacks_bb Types.BISHOP Types.A1 occupied in
+  let attacks = Bitboard.attacks_bb_occupied Types.BISHOP Types.A1 occupied in
   let expected_attacked_squares = [ Types.B2; Types.C3; Types.D4 ] in
   let expected_bb =
     List.fold ~init:Bitboard.empty ~f:Bitboard.bb_or_sq
@@ -995,7 +1023,9 @@ let%test_unit "test_sliding_attack_bishop_2_pieces_obstructing_diagonal" =
   [%test_result: Bitboard.t] ~expect:expected_bb attacks
 
 let%test_unit "test_magically_get_rook_attack_empty_board" =
-  let attacks = Bitboard.attacks_bb Types.ROOK Types.E4 Bitboard.empty in
+  let attacks =
+    Bitboard.attacks_bb_occupied Types.ROOK Types.E4 Bitboard.empty
+  in
   let expected_attacked_squares =
     [
       (* Down *)
@@ -1030,7 +1060,7 @@ let%test_unit "test_magically_get_rook_attack_1_obstructing_piece" =
     |> Fn.flip Bitboard.bb_or_sq Types.E6
     |> Fn.flip Bitboard.bb_or_sq Types.C4
   in
-  let attacks = Bitboard.attacks_bb Types.ROOK Types.E4 occupied in
+  let attacks = Bitboard.attacks_bb_occupied Types.ROOK Types.E4 occupied in
   let expected_attacked_squares =
     [
       (* Down *)
@@ -1055,7 +1085,9 @@ let%test_unit "test_magically_get_rook_attack_1_obstructing_piece" =
   [%test_result: Bitboard.t] ~expect:expected_bb attacks
 
 let%test_unit "test_get_king_attacks" =
-  let attacks = Bitboard.attacks_bb Types.KING Types.E4 Bitboard.empty in
+  let attacks =
+    Bitboard.attacks_bb_occupied Types.KING Types.E4 Bitboard.empty
+  in
   let expected_bb =
     List.fold ~init:Bitboard.empty ~f:Bitboard.bb_or_sq
       [
@@ -1072,7 +1104,9 @@ let%test_unit "test_get_king_attacks" =
   [%test_result: Bitboard.t] ~expect:expected_bb attacks
 
 let%test_unit "test_get_king_attacks_from_corner" =
-  let attacks = Bitboard.attacks_bb Types.KING Types.H8 Bitboard.empty in
+  let attacks =
+    Bitboard.attacks_bb_occupied Types.KING Types.H8 Bitboard.empty
+  in
   let expected_bb =
     List.fold ~init:Bitboard.empty ~f:Bitboard.bb_or_sq
       [ Types.H7; Types.G8; Types.G7 ]
@@ -1080,7 +1114,9 @@ let%test_unit "test_get_king_attacks_from_corner" =
   [%test_result: Bitboard.t] ~expect:expected_bb attacks
 
 let%test_unit "test_get_knight_attacks" =
-  let attacks = Bitboard.attacks_bb Types.KNIGHT Types.E3 Bitboard.empty in
+  let attacks =
+    Bitboard.attacks_bb_occupied Types.KNIGHT Types.E3 Bitboard.empty
+  in
   let expected_bb =
     List.fold ~init:Bitboard.empty ~f:Bitboard.bb_or_sq
       [
@@ -1097,7 +1133,9 @@ let%test_unit "test_get_knight_attacks" =
   [%test_result: Bitboard.t] ~expect:expected_bb attacks
 
 let%test_unit "test_get_knight_from_the_rim" =
-  let attacks = Bitboard.attacks_bb Types.KNIGHT Types.A3 Bitboard.empty in
+  let attacks =
+    Bitboard.attacks_bb_occupied Types.KNIGHT Types.A3 Bitboard.empty
+  in
   let expected_bb =
     List.fold ~init:Bitboard.empty ~f:Bitboard.bb_or_sq
       [ Types.B5; Types.C4; Types.C2; Types.B1 ]

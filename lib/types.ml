@@ -20,21 +20,27 @@ open Base
 
 (* TODO: Make a module out of this to prevent exposing unnecessary details *)
 module Types = struct
-  type colour = WHITE | BLACK [@@deriving enum]
+  type colour = WHITE | BLACK [@@deriving enum, eq]
 
   let other_colour = function WHITE -> BLACK | BLACK -> WHITE
 
   (* TODO: We can represent this as a bit-wise enum when we need it. *)
-  type castling_right =
-    | NO_CASTLING
-    | WHITE_OO
-    | WHITE_OOO
-    | BLACK_OO
-    | BLACK_OOO
+  type castling_right = WHITE_OO | WHITE_OOO | BLACK_OO | BLACK_OOO
   [@@deriving enum]
 
-  let all_castling_rights =
-    [ NO_CASTLING; WHITE_OO; WHITE_OOO; BLACK_OO; BLACK_OOO ]
+  let all_castling_rights = [ WHITE_OO; WHITE_OOO; BLACK_OO; BLACK_OOO ]
+
+  let castling_right_to_enum = function
+    | WHITE_OO -> 0b1
+    | WHITE_OOO -> 0b10
+    | BLACK_OO -> 0b100
+    | BLACK_OOO -> 0b1000
+
+  let castling_right_num_combinations = 2 ** 4
+
+  let is_kingside_castling = function
+    | WHITE_OO | BLACK_OO -> true
+    | WHITE_OOO | BLACK_OOO -> false
 
   (* Value represents a search value. The values used in search are always
    * supposed to be in the range (-value_none| value_none] and should not
@@ -68,7 +74,7 @@ module Types = struct
   (* TODO: Check if we need an enum of no piece and all pieces types. Wouldn't
      it be nicer to represent the absence of pieces using a None? *)
   type piece_type = PAWN | KNIGHT | BISHOP | ROOK | QUEEN | KING
-  [@@deriving enum, sexp, ord, show]
+  [@@deriving enum, sexp, ord, eq, show]
 
   let all_piece_types = [ PAWN; KNIGHT; BISHOP; ROOK; QUEEN; KING ]
 
@@ -87,7 +93,7 @@ module Types = struct
     | B_ROOK
     | B_QUEEN
     | B_KING
-  [@@deriving enum]
+  [@@deriving enum, eq]
 
   let all_pieces =
     [
@@ -444,9 +450,7 @@ module Types = struct
     Int.shift_right_logical (square_to_enum sq) 3
     |> rank_of_enum |> Stdlib.Option.get
 
-  (* TODO: Figure out where is this actually needed and if this is implemented
-     correctly. This just flips the RANK of the SQUARES for BLACK. I guess this
-     is interesting to find the 'equivalent' square of the other colour, e.g.
+  (* Find the 'equivalent' square from the perspective of the other colour, e.g.
      the black counterpart of the weak F2 square would be F7. *)
   let relative_sq colour sq =
     let colour_mask = match colour with WHITE -> 0 | BLACK -> 0b111000 in
@@ -466,7 +470,7 @@ module Types = struct
   type move_type = NORMAL | PROMOTION | EN_PASSANT | CASTLING
   [@@deriving enum, ord, eq, sexp]
 
-  type move = int
+  type move = int [@@deriving eq]
 
   (* A move needs 16 bits to be stored
      bit  0- 5: destination square (from 0 to 63)
