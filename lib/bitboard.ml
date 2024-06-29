@@ -27,6 +27,7 @@ module type BITBOARD = sig
   val show : t -> string
   val sexp_of_t : t -> Sexp.t
   val compare : t -> t -> int
+  val equal : t -> t -> bool
   val empty : t
   val file_A : t
   val file_B : t
@@ -103,6 +104,9 @@ module type BITBOARD = sig
 
   (* Takes a bitboard containing a single set bit and transforms it to a square *)
   val bb_to_square : t -> Types.square
+
+  (* Number of pieces on a certain bitboard *)
+  val popcount : t -> int
 end
 
 module Bitboard : BITBOARD = struct
@@ -111,6 +115,7 @@ module Bitboard : BITBOARD = struct
   let sexp_of_t t = Sexp.Atom (UInt64.to_string t)
   let compare = UInt64.compare
   let empty = UInt64.zero
+  let equal = UInt64.equal
 
   (* The first of every 8 bits is set, this is repeated 8 times *)
   let file_A = UInt64.of_int 0x0101010101010101

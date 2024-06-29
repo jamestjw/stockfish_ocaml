@@ -26,7 +26,6 @@ module Types = struct
 
   (* TODO: We can represent this as a bit-wise enum when we need it. *)
   type castling_right = WHITE_OO | WHITE_OOO | BLACK_OO | BLACK_OOO
-  [@@deriving enum]
 
   let all_castling_rights = [ WHITE_OO; WHITE_OOO; BLACK_OO; BLACK_OOO ]
 

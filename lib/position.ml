@@ -31,24 +31,30 @@ module Position = struct
    * board (by calling Position::do_move), a StateInfo object must be passed.
    *)
   type state_info = {
-    (* Copied when making a move *)
+    (*
+     * These fields are copied when making a move
+     *)
     material_key : key;
     pawn_key : key;
     non_pawn_material : Types.value array;
     castling_rights : int;
-    rule50 : int;
-    plies_from_null : int;
-    (* En passant square *)
+    rule50 : int; (* 50-move rule counter, draw if this reaches 50 *)
+    plies_from_null : int; (* TODO: What's this? *)
+    (* En passant square, i.e. the square that the enemy pawn will land on
+       after capturing en passant. This conveniently handles the case when
+       two possible pawns could capture en passant.*)
     ep_square : Types.square option;
-    (* Not copied when making a move (will be recomputed anyhow) *)
+    (*
+     * Below are not copied when making a move (will be recomputed anyhow)
+     *)
     key : key;
     checkers_bb : Bitboard.t;
-    previous : state_info list;
+    previous : state_info option;
     blockers_for_king : Bitboard.t array;
     pinners : Bitboard.t array;
     (* Squares checked by each piece type *)
     check_squares : Bitboard.t array;
-    captured_piece : Types.piece;
+    captured_piece : Types.piece option;
     repetition : int;
   }
 
@@ -57,13 +63,19 @@ module Position = struct
     by_type_bb : Bitboard.t array;
     by_colour_bb : Bitboard.t array;
     piece_count : int array;
+    (* TODO: Verify this
+       Every square potentially contains a piece that is involved in
+       some castling right. The int is the bitwise-or of all the
+       involved castling rights. This means that when a piece on that
+       square is moved or captured, then the value in the array is
+       precisely the change in castling rights. *)
     castling_rights_mask : int array;
     castling_rook_square : Types.square option array;
     castling_path : Bitboard.t array;
     game_ply : int;
     side_to_move : Types.colour;
     chess960 : bool;
-    st_list : state_info list;
+    st : state_info;
   }
 
   let side_to_move { side_to_move; _ } = side_to_move
@@ -96,8 +108,11 @@ module Position = struct
   let pieces_of_colour_and_pts pos colour pts =
     Bitboard.bb_and (pieces_of_colour pos colour) (pieces_of_pts pos pts)
 
-  let count_by_colour_and_pt { piece_count; _ } colour pt =
-    Array.get piece_count @@ Types.piece_to_enum @@ Types.mk_piece colour pt
+  let count_by_piece { piece_count; _ } piece =
+    Array.get piece_count @@ Types.piece_to_enum piece
+
+  let count_by_colour_and_pt pos colour pt =
+    count_by_piece pos @@ Types.mk_piece colour pt
 
   let count_by_pt pos pt =
     count_by_colour_and_pt pos Types.WHITE pt
@@ -109,10 +124,7 @@ module Position = struct
     pieces_of_colour_and_pts pos colour [ pt ]
     |> Bitboard.lsb |> Bitboard.bb_to_square
 
-  let ep_square { st_list; _ } =
-    match st_list with
-    | { ep_square; _ } :: _ -> ep_square
-    | _ -> failwith "Empty state info list"
+  let ep_square { st = { ep_square; _ }; _ } = ep_square
 
   (* TODO: Check what we are calling this with and where its used, maybe
      expecting enumbit*)
@@ -152,39 +164,34 @@ module Position = struct
           (pieces_of_colour_and_pt pos colour pt)
           pt (pieces pos)
 
-  let checkers { st_list; _ } = (List.hd_exn st_list).checkers_bb
+  let checkers { st = { checkers_bb; _ }; _ } = checkers_bb
 
-  let blockers_for_king { st_list; _ } colour =
-    Array.get (List.hd_exn st_list).blockers_for_king
-    @@ Types.colour_to_enum colour
+  let blockers_for_king { st = { blockers_for_king; _ }; _ } colour =
+    Array.get blockers_for_king @@ Types.colour_to_enum colour
 
-  let pinners { st_list; _ } colour =
-    Array.get (List.hd_exn st_list).pinners @@ Types.colour_to_enum colour
+  let pinners { st = { pinners; _ }; _ } colour =
+    Array.get pinners @@ Types.colour_to_enum colour
 
   (* Get squares from which we would check the enemy king *)
-  let check_squares { st_list; _ } pt =
-    Array.get (List.hd_exn st_list).check_squares @@ Types.piece_type_to_enum pt
+  let check_squares { st = { check_squares; _ }; _ } pt =
+    Array.get check_squares @@ Types.piece_type_to_enum pt
 
   (* Based on a congruential pseudo-random number generator *)
   let make_key seed =
     UInt64.mul seed @@ UInt64.of_string "6364136223846793005"
     |> UInt64.add @@ UInt64.of_string "1442695040888963407"
 
-  let adjust_key50 { st_list; _ } after_move k =
-    let rule50 = (List.hd_exn st_list).rule50 in
+  let adjust_key50 { st = { rule50; _ }; _ } after_move k =
     let threshold = if after_move then 14 - 1 else 14 in
     if rule50 < threshold then k
     else UInt64.logor k @@ make_key (UInt64.of_int ((rule50 - threshold) / 8))
 
-  let key ({ st_list; _ } as pos) =
-    adjust_key50 pos false @@ (List.hd_exn st_list).key
+  let key ({ st = { key; _ }; _ } as pos) = adjust_key50 pos false @@ key
+  let pawn_key { st = { pawn_key; _ }; _ } = pawn_key
+  let material_key { st = { material_key; _ }; _ } = material_key
 
-  let pawn_key { st_list; _ } = (List.hd_exn st_list).pawn_key
-  let material_key { st_list; _ } = (List.hd_exn st_list).material_key
-
-  let non_pawn_material_for_colour { st_list; _ } colour =
-    Array.get (List.hd_exn st_list).non_pawn_material
-    @@ Types.colour_to_enum colour
+  let non_pawn_material_for_colour { st = { non_pawn_material; _ }; _ } colour =
+    Array.get non_pawn_material @@ Types.colour_to_enum colour
 
   let non_pawn_material pos =
     non_pawn_material_for_colour pos Types.WHITE
@@ -193,8 +200,11 @@ module Position = struct
   let game_ply { game_ply; _ } = game_ply
 
   (* FIXME: Document what this means *)
-  let rule50_count { st_list; _ } = (List.hd_exn st_list).rule50
+  let rule50_count { st = { rule50; _ }; _ } = rule50
   let is_chess960 { chess960; _ } = chess960
+
+  let can_castle { st = { castling_rights; _ }; _ } cr =
+    Types.castling_right_to_enum cr land castling_rights <> 0
 
   (* FIXME: I think this returns moves generated during the capture stage? *)
   let is_capture pos m =
@@ -214,7 +224,7 @@ module Position = struct
     | true, _ | _, Some Types.QUEEN -> true
     | _ -> false
 
-  let captured_piece { st_list; _ } = (List.hd_exn st_list).captured_piece
+  let captured_piece { st = { captured_piece; _ }; _ } = captured_piece
 
   (* FIXME: Reconsider this mix of mutable and immutable data structure. Using
      functional updates alongside with inplace mutations doesn't feel very good. *)
@@ -383,10 +393,21 @@ module Position = struct
     assert (!count = 3668);
     { psq; en_passant; castling; side; no_pawns }
 
+  let get_zobrist_psq piece sq =
+    matrix_get zobrist_data.psq
+      (Types.piece_to_enum piece)
+      (Types.square_to_enum sq)
+
+  let get_zobrist_psq_with_count piece count =
+    matrix_get zobrist_data.psq (Types.piece_to_enum piece) count
+
+  let get_zobrist_ep sq =
+    Array.get zobrist_data.en_passant (Types.file_of_sq sq |> Types.file_to_enum)
+
   (* TODO: Test this function *)
   let set_castling_right
-      ({ st_list; castling_rights_mask; castling_rook_square; castling_path; _ }
-       as pos) colour rook_sq =
+      ({ st; castling_rights_mask; castling_rook_square; castling_path; _ } as
+       pos) colour rook_sq =
     let king_sq = square_of_pt_and_colour pos Types.KING colour in
     let king_sq_enum = Types.square_to_enum king_sq in
     let rook_sq_enum = Types.square_to_enum rook_sq in
@@ -400,12 +421,8 @@ module Position = struct
       | BLACK, false -> Types.BLACK_OOO
     in
     let cr_enum = Types.castling_right_to_enum cr in
-    let st_list =
-      match st_list with
-      | ({ castling_rights; _ } as hd) :: rest ->
-          { hd with castling_rights = castling_rights lor cr_enum } :: rest
-      | [] -> failwith "Missing st"
-    in
+    let st = { st with castling_rights = st.castling_rights lor cr_enum } in
+
     Array.set castling_rights_mask king_sq_enum
       (Array.get castling_rights_mask king_sq_enum lor cr_enum);
     Array.set castling_rights_mask rook_sq_enum
@@ -431,7 +448,7 @@ module Position = struct
             (Bitboard.square_bb king_sq || Bitboard.square_bb rook_sq))
     in
     Array.set castling_path cr_enum path;
-    { pos with st_list }
+    { pos with st }
 
   (*
    * Calculates st->blockersForKing[c] and st->pinners[~c],
@@ -439,7 +456,8 @@ module Position = struct
    * in check and the slider pieces of color ~c pinning pieces of color c to the
    * king.
    *)
-  let update_slider_blockers ({ st_list; _ } as pos) c =
+  let update_slider_blockers
+      ({ st = { blockers_for_king; pinners; _ }; _ } as pos) c =
     let other_c = Types.other_colour c in
     let king_sq = square_of_pt_and_colour pos Types.KING c in
     let our_pieces = pieces_of_colour pos c in
@@ -486,21 +504,19 @@ module Position = struct
     let blockers_bb, pinners_bb =
       do_snipers snipers Bitboard.empty Bitboard.empty
     in
-    match st_list with
-    | { blockers_for_king; pinners; _ } :: _ ->
-        Array.set blockers_for_king (Types.colour_to_enum c) blockers_bb;
-        Array.set pinners (Types.colour_to_enum other_c) pinners_bb
-    | [] -> failwith "Missing state info"
+
+    Array.set blockers_for_king (Types.colour_to_enum c) blockers_bb;
+    Array.set pinners (Types.colour_to_enum other_c) pinners_bb
 
   (* Sets king attacks to detect if a move gives check *)
-  let set_check_info ({ side_to_move; st_list; _ } as pos) =
+  let set_check_info ({ side_to_move; st; _ } as pos) =
     update_slider_blockers pos Types.WHITE;
     update_slider_blockers pos Types.BLACK;
 
     let enemy_colour = Types.other_colour side_to_move in
     (* Get square of opponent's king *)
     let king_sq = square_of_pt_and_colour pos Types.KING enemy_colour in
-    let check_squares = (List.hd_exn st_list).check_squares in
+    let check_squares = st.check_squares in
     let set_check_squares pt =
       Array.set check_squares (Types.piece_type_to_enum pt)
     in
@@ -548,7 +564,7 @@ module Position = struct
   let attackers_to_sq pos sq = attackers_to_occupied pos sq (pieces pos)
 
   (* TODO: Unit test this *)
-  let set_state ({ st_list; side_to_move; piece_count; _ } as pos) =
+  let set_state ({ st; side_to_move; piece_count; _ } as pos) =
     let rec do_pieces pieces_bb (key, pawn_key, white_npm, black_npm) =
       if Bitboard.bb_not_zero pieces_bb then
         let sq_bb, rest = Bitboard.pop_lsb pieces_bb in
@@ -585,9 +601,7 @@ module Position = struct
            (pieces_of_colour pos (Types.other_colour side_to_move))
     in
     set_check_info pos;
-    let { castling_rights; ep_square; non_pawn_material; _ } =
-      List.hd_exn pos.st_list
-    in
+    let { castling_rights; ep_square; non_pawn_material; _ } = st in
     let all_pieces = pieces pos in
     let key, pawn_key, white_npm, black_npm =
       do_pieces all_pieces
@@ -623,13 +637,8 @@ module Position = struct
             (0 -- (Array.get piece_count piece_enum - 1)))
         Types.all_pieces
     in
-    match st_list with
-    | st :: rest ->
-        {
-          pos with
-          st_list = { st with key; pawn_key; material_key; checkers_bb } :: rest;
-        }
-    | [] -> failwith "Missing state info"
+
+    { pos with st = { st with key; pawn_key; material_key; checkers_bb } }
 
   (* TODO: Unit test this *)
   let legal ({ side_to_move = us; chess960; _ } as pos) m =
@@ -920,10 +929,501 @@ module Position = struct
               |> Bitboard.sq_and_bb rook_dst
               |> Bitboard.bb_not_zero)
 
+  (* Performs some consistency checks for the position object
+     and raise an assert if something wrong is detected.
+     This is meant to be helpful when debugging. *)
+  let pos_is_ok
+      ({
+         side_to_move;
+         piece_count;
+         board;
+         castling_rook_square;
+         castling_rights_mask;
+         _;
+       } as pos) =
+    let fast = true in
+    let them = Types.other_colour side_to_move in
+
+    (* Check that kings are where they should be *)
+    assert (
+      Types.equal_piece Types.W_KING
+      @@ piece_on_exn pos (square_of_pt_and_colour pos Types.KING Types.WHITE));
+    assert (
+      Types.equal_piece Types.B_KING
+      @@ piece_on_exn pos (square_of_pt_and_colour pos Types.KING Types.BLACK));
+    (* Check that *)
+    (match ep_square pos with
+    | Some sq ->
+        assert (
+          Types.equal_rank Types.RANK_6
+          @@ Types.relative_rank_of_sq side_to_move sq)
+    | None -> ());
+
+    if fast then true
+    else (
+      (* Check king count *)
+      assert (Array.get piece_count (Types.piece_to_enum Types.W_KING) = 1);
+      assert (Array.get piece_count (Types.piece_to_enum Types.B_KING) = 1);
+      (* It musn't be the case that the king of the opposing player is under
+         attack on our turn. *)
+      assert (
+        attackers_to_sq pos (square_of_pt_and_colour pos Types.KING them)
+        |> Bitboard.bb_and (pieces_of_colour pos side_to_move)
+        |> Bitboard.bb_is_empty);
+
+      (* No pawns on the first and eight rank *)
+      assert (
+        pieces_of_pt pos Types.PAWN
+        |> Bitboard.bb_and (Bitboard.bb_or Bitboard.rank_1 Bitboard.rank_8)
+        |> Bitboard.bb_is_empty);
+
+      assert (Array.get piece_count (Types.piece_to_enum Types.W_PAWN) <= 8);
+      assert (Array.get piece_count (Types.piece_to_enum Types.B_PAWN) <= 8);
+
+      (* Check bitboards*)
+
+      (* Pieces of both colours do not overlap *)
+      assert (
+        pieces_of_colour pos Types.WHITE
+        |> Bitboard.bb_and (pieces_of_colour pos Types.BLACK)
+        |> Bitboard.bb_is_empty);
+
+      (* white | black == all pieces *)
+      assert (
+        Bitboard.equal
+          (pieces_of_colour pos Types.WHITE
+          |> Bitboard.bb_or (pieces_of_colour pos Types.BLACK))
+          (pieces pos));
+
+      assert (Bitboard.popcount (pieces_of_colour pos Types.WHITE) <= 16);
+      assert (Bitboard.popcount (pieces_of_colour pos Types.BLACK) <= 16);
+
+      (* Different piece types do not overlap *)
+      List.iter
+        (List.cartesian_product Types.all_piece_types Types.all_piece_types)
+        ~f:(fun (pt1, pt2) ->
+          if not @@ Types.equal_piece_type pt1 pt2 then
+            assert (
+              pieces_of_pt pos pt1
+              |> Bitboard.bb_and (pieces_of_pt pos pt2)
+              |> Bitboard.bb_is_empty));
+
+      (* Check piece counts *)
+      List.iter Types.all_pieces ~f:(fun pc ->
+          (* Check that piece counts are tracking the bitboards *)
+          assert (
+            count_by_piece pos pc
+            = Bitboard.popcount
+              @@ pieces_of_colour_and_pt pos (Types.color_of_piece pc)
+                   (Types.type_of_piece pc));
+          (* Check that piece counts are tracking what's on the board *)
+          assert (
+            Array.count board ~f:(fun pc' ->
+                match pc' with
+                | Some pc' -> Types.equal_piece pc pc'
+                | None -> false)
+            = count_by_piece pos pc));
+
+      (* Check castling rights *)
+      List.iter
+        [
+          (Types.WHITE, Types.WHITE_OO);
+          (Types.WHITE, Types.WHITE_OOO);
+          (Types.BLACK, Types.BLACK_OO);
+          (Types.BLACK, Types.BLACK_OOO);
+        ]
+        ~f:(fun (colour, cr) ->
+          if can_castle pos cr then (
+            let cr_enum = Types.castling_right_to_enum cr in
+            let crsq =
+              Array.get castling_rook_square cr_enum |> Stdlib.Option.get
+            in
+            (* Check that castling rook square is right *)
+            assert (
+              Types.equal_piece
+                (Types.mk_piece colour Types.ROOK)
+                (piece_on_exn pos crsq));
+            (* Check that the rook has the right castling rights mask *)
+            assert (
+              Array.get castling_rights_mask (Types.square_to_enum crsq)
+              = cr_enum);
+            (* Check that the king also has the right mask *)
+            assert (
+              Array.get castling_rights_mask
+                (Types.square_to_enum
+                @@ square_of_pt_and_colour pos Types.KING colour)
+              land cr_enum
+              = cr_enum)));
+
+      true)
+
+  (* `src` and `dst` are what are encoded into a castling move, i.e.
+     `src` is the KING square and `dst` is the ROOK's square.
+     `is_do` controls whether the functions does or undoes the castling *)
+  let do_castling pos is_do us src dst =
+    (* If the rook is on the right of the king, we are castling kingside. *)
+    let is_kingside = Types.compare_square dst src > 0 in
+    (* This is based on how we encoded castling *)
+    let rook_src = dst in
+    let rook_dst =
+      Types.relative_sq us (if is_kingside then Types.F1 else Types.D1)
+    in
+    let king_src = src in
+    let king_dst =
+      Types.relative_sq us (if is_kingside then Types.G1 else Types.C1)
+    in
+
+    (* TODO: Some NNUE stuff here *)
+
+    (* Remove both pieces first since squares could overlap in Chess960 *)
+    remove_piece pos @@ if is_do then king_src else king_dst;
+    remove_piece pos @@ if is_do then rook_src else rook_dst;
+    put_piece pos
+      (Types.mk_piece us Types.KING)
+      (if is_do then king_dst else king_src);
+    put_piece pos
+      (Types.mk_piece us Types.ROOK)
+      (if is_do then rook_dst else rook_src);
+    (king_dst, rook_src, rook_dst)
+
+  let new_st_from_prev
+      ({ (* This needs to be duplicated *)
+         non_pawn_material; _ } as st) =
+    {
+      st with
+      previous = Some st;
+      non_pawn_material = Array.copy non_pawn_material;
+      (* These need to reinitialised *)
+      key = UInt64.zero;
+      checkers_bb = Bitboard.empty;
+      blockers_for_king = Array.create ~len:2 Bitboard.empty;
+      pinners = Array.create ~len:2 Bitboard.empty;
+      check_squares =
+        Array.create ~len:(List.length Types.all_piece_types) Bitboard.empty;
+      captured_piece = None;
+      repetition = 0;
+    }
+
+  (* Three possible values,
+     - 0 : No repetition
+     - >0 : Distance from the previous occurrence of this position
+     - <0 : Distance from the previous occurence and is a 3-fold *)
+  let get_repetition_info ({ rule50; plies_from_null; key; _ } as st) =
+    (* Take two steps back along the chain *)
+    let get_prev st =
+      Stdlib.Option.get @@ (Stdlib.Option.get st.previous).previous
+    in
+    let end_idx = Int.min rule50 plies_from_null in
+    let rec helper i stp =
+      if i <= end_idx then
+        let stp = get_prev stp in
+        if UInt64.equal key stp.key then
+          (* If that position has already repeated, then this will
+             be a 3-fold, hence we return a negative value *)
+          if stp.repetition <> 0 then -i else i
+        else helper (i + 2) stp
+      else (* Not enough moves to find a repetition *)
+        0
+    in
+    (* We start at 4, as it is impossible to get a 3-fold repetition
+       earlier than this. *)
+    if end_idx >= 4 then helper 4 (get_prev st) else 0
+
   (* Makes a move, and saves all information necessary
      to a StateInfo object. The move is assumed to be legal. Pseudo-legal
      moves should be filtered out before this function is called. *)
-  let do_move pos m new_st gives_check = ()
+  (* TODO: Unit test this *)
+  let do_move
+      ({ st; game_ply; side_to_move = us; piece_count; castling_rights_mask; _ }
+       as pos) m gives_check =
+    assert (Types.move_is_ok m);
+
+    let key = UInt64.logxor st.key zobrist_data.side in
+    let old_st = st in
+
+    (* Increment ply counters. In particular, rule50 will be reset to zero later on
+       in case of a capture or a pawn move. *)
+    let new_st =
+      {
+        (new_st_from_prev st) with
+        rule50 = old_st.rule50 + 1;
+        plies_from_null = old_st.plies_from_null + 1;
+      }
+    in
+
+    let game_ply = game_ply + 1 in
+
+    (* TODO: There is NNUE stuff to handle here *)
+    let them = Types.other_colour us in
+    let src = Types.move_src m in
+    let dst = Types.move_dst m in
+    let piece = piece_on_exn pos src in
+    let captured_piece =
+      match Types.get_move_type m with
+      | Types.EN_PASSANT -> Some (Types.mk_piece them Types.PAWN)
+      | _ -> piece_on pos dst
+    in
+    let is_castling =
+      Types.equal_move_type Types.CASTLING @@ Types.get_move_type m
+    in
+
+    (* Sanity checks *)
+    assert (Types.equal_colour us @@ Types.color_of_piece piece);
+    (match captured_piece with
+    | Some piece ->
+        (* We encode castling as capturing our own rook *)
+        assert (
+          Types.equal_colour
+            (Types.color_of_piece piece)
+            (if is_castling then us else them));
+        assert (
+          not @@ Types.equal_piece_type Types.KING (Types.type_of_piece piece))
+    | None -> ());
+
+    (* Handle castling, this also clears out the captured piece, setting
+       the stage for the below. *)
+    let captured_piece, dst, key =
+      if is_castling then (
+        let our_rook = Types.mk_piece us Types.ROOK in
+        assert (Types.equal_piece piece @@ Types.mk_piece us Types.KING);
+        assert (Types.equal_piece (Stdlib.Option.get captured_piece) our_rook);
+        let king_dst, rook_src, rook_dst = do_castling pos true us src dst in
+        let key =
+          UInt64.logxor key (get_zobrist_psq our_rook rook_src)
+          |> UInt64.logxor (get_zobrist_psq our_rook rook_dst)
+        in
+
+        (None, king_dst, key))
+      else (captured_piece, dst, key)
+    in
+
+    (* Handle piece captures *)
+    let key, new_st =
+      match captured_piece with
+      | Some captured_piece ->
+          let capture_sq = dst in
+          (* If it was an en passant, the captured sq maybe something else *)
+          let capture_sq, new_st =
+            match Types.type_of_piece captured_piece with
+            | Types.PAWN ->
+                let capture_sq =
+                  match Types.get_move_type m with
+                  | Types.EN_PASSANT ->
+                      let res =
+                        Types.sq_sub_dir capture_sq
+                        @@ Types.pawn_push_direction us
+                        |> Stdlib.Option.get
+                      in
+                      (* Some sanity checks *)
+                      assert (
+                        Types.equal_piece piece (Types.mk_piece us Types.PAWN));
+                      assert (
+                        Types.equal_square dst
+                          (Stdlib.Option.get old_st.ep_square));
+                      assert (
+                        Types.equal_rank
+                          (Types.relative_rank_of_sq us dst)
+                          Types.RANK_6);
+                      assert (Option.is_none @@ piece_on pos dst);
+                      assert (
+                        Types.equal_piece
+                          (piece_on_exn pos capture_sq)
+                          (Types.mk_piece them Types.PAWN));
+                      res
+                  | _ -> capture_sq
+                in
+                ( capture_sq,
+                  {
+                    new_st with
+                    pawn_key =
+                      UInt64.logxor new_st.pawn_key
+                      @@ get_zobrist_psq captured_piece capture_sq;
+                  } )
+            | _ ->
+                let piece_val = Types.piece_value captured_piece in
+                Array.set new_st.non_pawn_material
+                  (Types.colour_to_enum them)
+                  (Array.get new_st.non_pawn_material
+                     (Types.colour_to_enum them)
+                  - piece_val);
+                (capture_sq, new_st)
+          in
+
+          (* TODO: NNUE stuff *)
+          remove_piece pos capture_sq;
+
+          (* Update material hash key and prefetch access to materialTable *)
+          let key =
+            UInt64.logxor key @@ get_zobrist_psq captured_piece capture_sq
+          in
+
+          ( key,
+            {
+              new_st with
+              (* Reset rule50 *)
+              rule50 = 0;
+              (* FIXME: What is this really doing? *)
+              material_key =
+                UInt64.logxor new_st.material_key
+                @@ matrix_get zobrist_data.psq
+                     (Types.piece_to_enum captured_piece)
+                @@ Array.get piece_count (Types.piece_to_enum captured_piece);
+            } )
+      | None -> (key, new_st)
+    in
+
+    (* Update hash key *)
+    let key =
+      UInt64.logxor key (get_zobrist_psq piece src)
+      |> UInt64.logxor (get_zobrist_psq piece dst)
+    in
+
+    (* Reset en passant square *)
+    let key, new_st =
+      match new_st.ep_square with
+      | Some sq ->
+          ( UInt64.logxor key @@ get_zobrist_ep sq,
+            { new_st with ep_square = None } )
+      | None -> (key, new_st)
+    in
+
+    let src_dst_cr_mask =
+      Array.get castling_rights_mask (Types.square_to_enum src)
+      lor Array.get castling_rights_mask (Types.square_to_enum dst)
+    in
+
+    (* Update castling rights if needed *)
+    let key, new_st =
+      if new_st.castling_rights <> 0 && src_dst_cr_mask <> 0 then
+        (* Remove old castling rights from the key *)
+        let key =
+          UInt64.logxor key
+            (Array.get zobrist_data.castling new_st.castling_rights)
+        in
+        (* Amend castling rights *)
+        let castling_rights =
+          new_st.castling_rights land lnot src_dst_cr_mask
+        in
+        (* Add it to the key *)
+        let key =
+          UInt64.logxor key (Array.get zobrist_data.castling castling_rights)
+        in
+        (key, { new_st with castling_rights })
+      else (key, new_st)
+    in
+
+    (* For castling, this move would have been handled earlier *)
+    (* TODO: NNUE stuff *)
+    if not is_castling then move_piece pos src dst;
+
+    (* Some extra work needs to be done for pawn moves *)
+    let key, new_st =
+      if Types.equal_piece_type Types.PAWN (Types.type_of_piece piece) then
+        (* Maybe set en passant square *)
+        let new_st, key =
+          let candidate_ep_sq =
+            Types.sq_sub_dir dst (Types.pawn_push_direction us)
+            |> Stdlib.Option.get
+          in
+          if
+            (* FIXME: This doesn't seem to be a nice way to check that a pawn
+               advanced by 2 squares *)
+            Types.square_to_enum src lxor Types.square_to_enum dst = 16
+            && Bitboard.bb_not_zero
+               @@ Bitboard.bb_and
+                    (Bitboard.pawn_attacks_bb_from_sq us candidate_ep_sq)
+                    (pieces_of_colour_and_pt pos them Types.PAWN)
+          then
+            ( { new_st with ep_square = Some candidate_ep_sq },
+              UInt64.logxor key @@ get_zobrist_ep candidate_ep_sq )
+          else ({ new_st with ep_square = None }, key)
+        in
+
+        (* Handle promotion *)
+        let key, new_st =
+          if Types.equal_move_type Types.PROMOTION (Types.get_move_type m) then (
+            let promote_to =
+              Types.mk_piece us (Types.get_ppt m |> Stdlib.Option.get)
+            in
+            assert (
+              Types.equal_rank Types.RANK_8 (Types.relative_rank_of_sq us dst));
+            (* Remove the pawn and put the new piece there *)
+            remove_piece pos dst;
+            put_piece pos promote_to dst;
+
+            (* TODO: NNUE stuff *)
+
+            (* Update hash keys *)
+            let key =
+              UInt64.logxor key (get_zobrist_psq piece dst)
+              |> UInt64.logxor (get_zobrist_psq promote_to dst)
+            in
+
+            Array.set new_st.non_pawn_material (Types.colour_to_enum us)
+              (Array.get new_st.non_pawn_material (Types.colour_to_enum us)
+              + Types.piece_value promote_to);
+
+            ( key,
+              {
+                new_st with
+                pawn_key =
+                  UInt64.logxor new_st.pawn_key (get_zobrist_psq piece dst);
+                (* TODO: Why -1? *)
+                material_key =
+                  UInt64.logxor new_st.material_key
+                  @@ get_zobrist_psq_with_count promote_to
+                       (Array.get piece_count (Types.piece_to_enum promote_to)
+                       - 1)
+                  |> UInt64.logxor
+                     @@ get_zobrist_psq_with_count piece
+                          (Array.get piece_count (Types.piece_to_enum piece));
+              } ))
+          else (key, new_st)
+        in
+
+        ( key,
+          {
+            new_st with
+            (* Pawn hash key *)
+            pawn_key =
+              UInt64.logxor new_st.pawn_key (get_zobrist_psq piece src)
+              |> UInt64.logxor (get_zobrist_psq piece dst);
+            (* Pawn move resets 50-move rule *)
+            rule50 = 0;
+          } )
+      else (key, new_st)
+    in
+
+    (* TODO: Check that its fine to call attackers_to with old st, AFAIK
+       it does not touch `st` so it's fine since `pos` contains updated data. *)
+    let checkers_bb =
+      if gives_check then
+        attackers_to_sq pos (square_of_pt_and_colour pos Types.KING them)
+        |> Bitboard.bb_and (pieces_of_colour pos us)
+      else Bitboard.empty
+    in
+
+    let new_st =
+      {
+        new_st with
+        checkers_bb;
+        key;
+        captured_piece;
+        repetition = get_repetition_info new_st;
+      }
+    in
+
+    let new_pos = { pos with st = new_st; side_to_move = them; game_ply } in
+
+    (* We need to construct new `pos` before setting check info as it will
+       expect to see the fresh state. *)
+
+    (* Update king attacks used for fast check detection *)
+    set_check_info new_pos;
+
+    assert (pos_is_ok pos);
+
+    new_pos
 end
 
 let%test_unit "dummy_test" = ()
