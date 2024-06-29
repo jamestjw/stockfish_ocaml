@@ -1424,6 +1424,91 @@ module Position = struct
     assert (pos_is_ok pos);
 
     new_pos
+
+  (* Undos a move. When it returns, the position should
+     be restored to exactly the same state as before the move was made. *)
+  (* TODO: Unit test this *)
+  let undo_move
+      ({ side_to_move; game_ply; st = { captured_piece; previous; _ }; _ } as
+       pos) m =
+    assert (Types.move_is_ok m);
+    let us = Types.other_colour side_to_move in
+    let them = side_to_move in
+    let src = Types.move_src m in
+    let dst = Types.move_dst m in
+    let pos = { pos with side_to_move = us } in
+
+    (* The source should be empty now... unless it was CASTLING, in which
+       case the square could be occupied in chess960. *)
+    assert (
+      is_empty pos src
+      || (Types.equal_move_type Types.CASTLING @@ Types.get_move_type m));
+
+    (match captured_piece with
+    | Some pc ->
+        assert (
+          not @@ Types.equal_piece_type Types.KING @@ Types.type_of_piece pc)
+    | None -> ());
+
+    if Types.equal_move_type Types.PROMOTION @@ Types.get_move_type m then (
+      let pc = piece_on_exn pos dst in
+      assert (Types.equal_rank Types.RANK_8 (Types.relative_rank_of_sq us dst));
+      assert (
+        Types.equal_piece_type (Types.type_of_piece pc)
+          (Types.get_ppt m |> Stdlib.Option.get));
+      (* Swap the piece with a pawn as the remaining code will handle it *)
+      remove_piece pos dst;
+      put_piece pos (Types.mk_piece us Types.PAWN) dst);
+
+    (match Types.get_move_type m with
+    | Types.CASTLING -> ignore @@ do_castling pos false us src dst
+    | _ -> (
+        (* Move piece back to where it was originally *)
+        move_piece pos dst src;
+
+        match captured_piece with
+        | Some captured_piece ->
+            let pc = piece_on_exn pos dst in
+            let cap_sq =
+              (* Captured sq is not the destination if it was en passant *)
+              if Types.equal_move_type Types.EN_PASSANT @@ Types.get_move_type m
+              then (
+                let res =
+                  Types.sq_sub_dir dst (Types.pawn_push_direction us)
+                  |> Stdlib.Option.get
+                in
+                (* Check that it was indeed a pawn move *)
+                assert (
+                  Types.equal_piece_type Types.PAWN @@ Types.type_of_piece pc);
+
+                (* Check that the pawn was on the previous ep_square on the
+                   6th rank*)
+                assert (
+                  Types.equal_square dst @@ Stdlib.Option.get
+                  @@ (Stdlib.Option.get previous).ep_square);
+                assert (
+                  Types.equal_rank Types.RANK_6
+                  @@ Types.relative_rank_of_sq us dst);
+                (* Check that the supposedly captured pawn is not on its
+                   original square *)
+                assert (Option.is_none @@ piece_on pos res);
+                (* Check that the captured piece was an enemy pawn *)
+                assert (
+                  Types.equal_piece captured_piece
+                  @@ Types.mk_piece them Types.PAWN);
+                res)
+              else dst
+            in
+            (* Restore the captured piece *)
+            put_piece pos captured_piece cap_sq
+        | None -> ()));
+
+    let pos =
+      { pos with game_ply = game_ply - 1; st = Stdlib.Option.get previous }
+    in
+
+    assert (pos_is_ok pos);
+    pos
 end
 
 let%test_unit "dummy_test" = ()
