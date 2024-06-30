@@ -181,6 +181,7 @@ module Position = struct
     UInt64.mul seed @@ UInt64.of_string "6364136223846793005"
     |> UInt64.add @@ UInt64.of_string "1442695040888963407"
 
+  (* TODO: How in the world does this work? *)
   let adjust_key50 { st = { rule50; _ }; _ } after_move k =
     let threshold = if after_move then 14 - 1 else 14 in
     if rule50 < threshold then k
@@ -1104,6 +1105,26 @@ module Position = struct
       repetition = 0;
     }
 
+  (* Creates a full copy of `st` for null moves *)
+  let new_full_copy_st_from_prev
+      ({
+         (* These fields need to be duplicated *)
+         non_pawn_material;
+         blockers_for_king;
+         pinners;
+         check_squares;
+         _;
+       } as st) =
+    (* Copy all the arrays *)
+    {
+      st with
+      previous = Some st;
+      non_pawn_material = Array.copy non_pawn_material;
+      blockers_for_king = Array.copy blockers_for_king;
+      pinners = Array.copy pinners;
+      check_squares = Array.copy check_squares;
+    }
+
   (* Three possible values,
      - 0 : No repetition
      - >0 : Distance from the previous occurrence of this position
@@ -1509,6 +1530,272 @@ module Position = struct
 
     assert (pos_is_ok pos);
     pos
+
+  let do_null_move ({ st; _ } as pos) =
+    (* We can't do a null move when the player is in check *)
+    assert (Bitboard.bb_is_empty @@ checkers pos);
+    let new_st = new_full_copy_st_from_prev st in
+
+    (* TODO: NNUE stuff *)
+
+    (* Remove en passant square and update key *)
+    let new_st =
+      match new_st.ep_square with
+      | Some ep_square ->
+          {
+            new_st with
+            key = UInt64.logxor new_st.key @@ get_zobrist_ep ep_square;
+            ep_square = None;
+          }
+      | None -> new_st
+    in
+
+    let new_st =
+      {
+        new_st with
+        key = UInt64.logxor new_st.key zobrist_data.side;
+        rule50 = new_st.rule50 + 1;
+      }
+    in
+
+    (* TODO: Prefetch TT entry *)
+    let new_st = { new_st with plies_from_null = 0; repetition = 0 } in
+    (* Build a new pos with the updated info so we can set check_info *)
+    let pos =
+      {
+        pos with
+        st = new_st;
+        side_to_move = Types.other_colour pos.side_to_move;
+      }
+    in
+
+    set_check_info pos;
+    assert (pos_is_ok pos);
+
+    pos
+
+  (* The only way to undo a null move *)
+  let undo_null_move ({ st; side_to_move; _ } as pos) =
+    (* No one should be checked before/after applying a null move *)
+    assert (Bitboard.bb_is_empty @@ checkers pos);
+
+    {
+      pos with
+      side_to_move = Types.other_colour side_to_move;
+      st = Stdlib.Option.get st.previous;
+    }
+
+  (* TODO: Could this be a null move? *)
+  (* FIXME: Figure out what this is really used for and document it better *)
+  (*
+   * Computes the new hash key after the given move. Needed for speculative
+   * prefetch. It doesn't recognize special moves like castling, en passant
+   * and promotions.
+   *)
+
+  let key_after ({ st = { key; _ }; _ } as pos) m =
+    let src = Types.move_src m in
+    let dst = Types.move_dst m in
+    let piece = piece_on_exn pos src in
+    let captured = piece_on pos src in
+    let k = UInt64.logxor key zobrist_data.side in
+
+    let k =
+      match captured with
+      | Some captured -> get_zobrist_psq captured dst
+      | None -> k
+    in
+
+    let k =
+      UInt64.logxor k (get_zobrist_psq piece src)
+      |> UInt64.logxor (get_zobrist_psq piece dst)
+    in
+
+    if
+      Option.is_some captured
+      || (Types.equal_piece_type Types.PAWN @@ Types.type_of_piece piece)
+    then k
+    else adjust_key50 pos true k
+
+  (*
+   * Tests if the SEE (Static Exchange Evaluation)
+   * value of move is greater or equal to the given threshold. We'll use an
+   * algorithm similar to alpha-beta pruning with a null window.
+   *)
+  (* TODO: Unit test this *)
+  let see_ge ({ side_to_move; _ } as pos) m threshold =
+    let src = Types.move_src m in
+    let dst = Types.move_dst m in
+    let rec helper stm attackers occupied swap res =
+      (* FIXME: Changing the colour here is weird, I should change it
+         during the recursive call maybe? *)
+      let stm = Types.other_colour stm in
+      let them = Types.other_colour stm in
+      (* Occupied contains all the pieces on the board, we make sure that
+         the attackers contain only pieces that still exist. *)
+      let attackers = Bitboard.bb_and attackers occupied in
+      let stm_attackers =
+        Bitboard.bb_and attackers (pieces_of_colour pos stm)
+      in
+
+      (* If stm has no more attackers then give up: stm loses *)
+      if Bitboard.bb_is_empty stm_attackers then res
+      else
+        (* Don't allow pinned pieces to attack as long as there are
+           pinners on their original square. *)
+        let stm_attackers =
+          if Bitboard.bb_not_zero (pinners pos them |> Bitboard.bb_and occupied)
+          then
+            Bitboard.bb_and stm_attackers
+              (Bitboard.bb_not @@ blockers_for_king pos stm)
+          else stm_attackers
+        in
+
+        (* Check again if there are any attackers left *)
+        (* TODO: Can I combine the two checks? Try this after adding unit
+           tests *)
+        if Bitboard.bb_is_empty stm_attackers then res
+        else
+          (* Flip the result since the stm still has attackers, in the
+             recursive call if the other side has no more pieces, then this
+             shall be the final result. *)
+          let res = res lxor 1 in
+          (* FIXME: HMM maybe it would be nice to refactor these so that we don't
+             need to generate all the attackers in one go since we might not
+             require all of them. *)
+          let pawn_attackers =
+            Bitboard.bb_and stm_attackers (pieces_of_pt pos Types.PAWN)
+          in
+          let knight_attackers =
+            Bitboard.bb_and stm_attackers (pieces_of_pt pos Types.KNIGHT)
+          in
+          let bishop_attackers =
+            Bitboard.bb_and stm_attackers (pieces_of_pt pos Types.BISHOP)
+          in
+          let rook_attackers =
+            Bitboard.bb_and stm_attackers (pieces_of_pt pos Types.ROOK)
+          in
+          let queen_attackers =
+            Bitboard.bb_and stm_attackers (pieces_of_pt pos Types.QUEEN)
+          in
+
+          (* Locate and remove the next least valuable attacker, and add to
+             the bitboard 'attackers' any X-ray attackers behind it. *)
+          if Bitboard.bb_not_zero pawn_attackers then
+            let swap = Types.pawn_value - swap in
+            (* If giving up the least valuable piece isn't good enough, then
+               nothing will be. The same logic applies in the other branches
+               too. *)
+            if swap < res then res
+            else
+              let occupied =
+                Bitboard.bb_xor occupied (Bitboard.lsb pawn_attackers)
+              in
+              (* Since pawns attack like bishops, them moving could
+                 unleash other attackers that attack diagonally. *)
+              let attackers =
+                Bitboard.bb_or attackers
+                  (Bitboard.attacks_bb_occupied Types.BISHOP dst occupied
+                  |> Bitboard.bb_and
+                     @@ pieces_of_pts pos [ Types.QUEEN; Types.BISHOP ])
+              in
+              helper stm attackers occupied swap res
+          else if Bitboard.bb_not_zero knight_attackers then
+            let swap = Types.knight_value - swap in
+            if swap < res then res
+            else
+              let occupied =
+                Bitboard.bb_xor occupied (Bitboard.lsb knight_attackers)
+              in
+              (* By moving a knight, this will not unleash more attackers
+                 on the destination square. *)
+              helper stm attackers occupied swap res
+          else if Bitboard.bb_not_zero bishop_attackers then
+            let swap = Types.bishop_value - swap in
+            if swap < res then res
+            else
+              let occupied =
+                Bitboard.bb_xor occupied (Bitboard.lsb bishop_attackers)
+              in
+              let attackers =
+                Bitboard.bb_or attackers
+                  (Bitboard.attacks_bb_occupied Types.BISHOP dst occupied
+                  |> Bitboard.bb_and
+                     @@ pieces_of_pts pos [ Types.QUEEN; Types.BISHOP ])
+              in
+              helper stm attackers occupied swap res
+          else if Bitboard.bb_not_zero rook_attackers then
+            let swap = Types.rook_value - swap in
+            if swap < res then res
+            else
+              let occupied =
+                Bitboard.bb_xor occupied (Bitboard.lsb rook_attackers)
+              in
+              let attackers =
+                Bitboard.bb_or attackers
+                  (Bitboard.attacks_bb_occupied Types.ROOK dst occupied
+                  |> Bitboard.bb_and
+                     @@ pieces_of_pts pos [ Types.QUEEN; Types.ROOK ])
+              in
+              helper stm attackers occupied swap res
+          else if Bitboard.bb_not_zero queen_attackers then
+            let swap = Types.queen_value - swap in
+            if swap < res then res
+            else
+              let occupied =
+                Bitboard.bb_xor occupied (Bitboard.lsb queen_attackers)
+              in
+              let attackers =
+                Bitboard.bb_or attackers
+                  (Bitboard.attacks_bb_occupied Types.ROOK dst occupied
+                  |> Bitboard.bb_and
+                     @@ pieces_of_pts pos [ Types.QUEEN; Types.ROOK ])
+                |> Bitboard.bb_or
+                     (Bitboard.attacks_bb_occupied Types.BISHOP dst occupied
+                     |> Bitboard.bb_and
+                        @@ pieces_of_pts pos [ Types.QUEEN; Types.BISHOP ])
+              in
+              helper stm attackers occupied swap res
+          else if
+            (* KING:
+               If we "capture" with the king but the opponent still has attackers,
+               reverse the result. *)
+            Bitboard.bb_not_zero
+              (Bitboard.bb_and attackers
+              @@ Bitboard.bb_not (pieces_of_colour pos stm))
+          then res lxor 1
+          else res
+    in
+    assert (Types.move_is_ok m);
+
+    (* Only deal with normal moves, assume others pass a simple SEE, i.e.
+       we do a test with 0 as the value *)
+    if not @@ Types.equal_move_type Types.NORMAL @@ Types.get_move_type m then
+      Types.value_zero >= threshold
+    else
+      (* Value of winning the destination piece *)
+      let swap = (Types.piece_value @@ piece_on_exn pos dst) - threshold in
+      (* If taking it for free isn't good enough, then nothing will be *)
+      if swap < 0 then false
+      else
+        let swap = (Types.piece_value @@ piece_on_exn pos src) - swap in
+        (* If trading our piece for the target is good enough, then we
+           don't have to look any further (since we won't be obliged to capture
+           back if this piece gets taken) *)
+        if swap <= 0 then true
+        else (
+          assert (
+            Types.equal_colour side_to_move
+            @@ Types.color_of_piece @@ piece_on_exn pos src);
+
+          (* Occupancy after exchanging once
+             xoring `dst` is important for pinned piece logic *)
+          let occupied =
+            pieces pos |> Bitboard.sq_xor_bb src |> Bitboard.sq_xor_bb dst
+          in
+          let attackers = attackers_to_occupied pos dst occupied in
+          (* Convert the int to bool *)
+          helper side_to_move attackers occupied swap 1 <> 0)
 end
 
 let%test_unit "dummy_test" = ()
