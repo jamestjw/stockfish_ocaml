@@ -21,6 +21,7 @@ open Bitboard
 open Types
 open Unsigned
 open Utils
+module BB = Bitboard
 
 module Position = struct
   type key = UInt64.t
@@ -48,20 +49,20 @@ module Position = struct
      * Below are not copied when making a move (will be recomputed anyhow)
      *)
     key : key;
-    checkers_bb : Bitboard.t;
+    checkers_bb : BB.t;
     previous : state_info option;
-    blockers_for_king : Bitboard.t array;
-    pinners : Bitboard.t array;
+    blockers_for_king : BB.t array;
+    pinners : BB.t array;
     (* Squares checked by each piece type *)
-    check_squares : Bitboard.t array;
+    check_squares : BB.t array;
     captured_piece : Types.piece option;
     repetition : int;
   }
 
   type t = {
     board : Types.piece option array;
-    by_type_bb : Bitboard.t array;
-    by_colour_bb : Bitboard.t array;
+    by_type_bb : BB.t array;
+    by_colour_bb : BB.t array;
     piece_count : int array;
     (* TODO: Verify this
        Every square potentially contains a piece that is involved in
@@ -71,7 +72,7 @@ module Position = struct
        precisely the change in castling rights. *)
     castling_rights_mask : int array;
     castling_rook_square : Types.square option array;
-    castling_path : Bitboard.t array;
+    castling_path : BB.t array;
     game_ply : int;
     side_to_move : Types.colour;
     chess960 : bool;
@@ -89,8 +90,8 @@ module Position = struct
     Array.get by_type_bb (Types.piece_type_to_enum pt)
 
   let pieces_of_pts pos pts =
-    List.fold ~init:Bitboard.empty
-      ~f:(fun acc pt -> Bitboard.bb_or acc @@ pieces_of_pt pos pt)
+    List.fold ~init:BB.empty
+      ~f:(fun acc pt -> BB.bb_or acc @@ pieces_of_pt pos pt)
       pts
 
   let pieces_of_colour { by_colour_bb; _ } colour =
@@ -98,15 +99,15 @@ module Position = struct
 
   (* Get all pieces *)
   let pieces pos =
-    Bitboard.bb_or
+    BB.bb_or
       (pieces_of_colour pos Types.WHITE)
       (pieces_of_colour pos Types.BLACK)
 
   let pieces_of_colour_and_pt pos colour pt =
-    Bitboard.bb_and (pieces_of_colour pos colour) (pieces_of_pt pos pt)
+    BB.bb_and (pieces_of_colour pos colour) (pieces_of_pt pos pt)
 
   let pieces_of_colour_and_pts pos colour pts =
-    Bitboard.bb_and (pieces_of_colour pos colour) (pieces_of_pts pos pts)
+    BB.bb_and (pieces_of_colour pos colour) (pieces_of_pts pos pts)
 
   let count_by_piece { piece_count; _ } piece =
     Array.get piece_count @@ Types.piece_to_enum piece
@@ -121,8 +122,7 @@ module Position = struct
   (* When there is only one of this piece on the board, get its square. *)
   let square_of_pt_and_colour pos pt colour =
     assert (count_by_colour_and_pt pos colour pt = 1);
-    pieces_of_colour_and_pts pos colour [ pt ]
-    |> Bitboard.lsb |> Bitboard.bb_to_square
+    pieces_of_colour_and_pts pos colour [ pt ] |> BB.lsb |> BB.bb_to_square
 
   let ep_square { st = { ep_square; _ }; _ } = ep_square
 
@@ -132,9 +132,9 @@ module Position = struct
   let castling_impeded ({ castling_path; _ } as pos) cr =
     match cr with
     | Types.WHITE_OO | Types.WHITE_OOO | Types.BLACK_OO | Types.BLACK_OOO ->
-        Bitboard.bb_and (pieces pos)
+        BB.bb_and (pieces pos)
           (Array.get castling_path (Types.castling_right_to_enum cr))
-        |> Bitboard.bb_not_zero
+        |> BB.bb_not_zero
 
   (* TODO: Check what we are calling this with and where its used, maybe
      expecting enumbit*)
@@ -146,23 +146,20 @@ module Position = struct
   (* Returns all the squares attacked by a certain colour *)
   let attacks_by pos pt colour =
     let rec helper threats attackers pt obstacles =
-      if Bitboard.bb_not_zero attackers then
-        let attacker, attackers = Bitboard.pop_lsb attackers in
-        let attacker_sq = Bitboard.bb_to_square attacker in
+      if BB.bb_not_zero attackers then
+        let attacker, attackers = BB.pop_lsb attackers in
+        let attacker_sq = BB.bb_to_square attacker in
         helper
-          (Bitboard.bb_or threats
-          @@ Bitboard.attacks_bb_occupied pt attacker_sq obstacles)
+          (BB.bb_or threats @@ BB.attacks_bb_occupied pt attacker_sq obstacles)
           attackers pt obstacles
       else threats
     in
     match pt with
     | Types.PAWN ->
-        Bitboard.pawn_attacks_bb colour
+        BB.pawn_attacks_bb colour
           (pieces_of_colour_and_pt pos colour Types.PAWN)
     | _ ->
-        helper Bitboard.empty
-          (pieces_of_colour_and_pt pos colour pt)
-          pt (pieces pos)
+        helper BB.empty (pieces_of_colour_and_pt pos colour pt) pt (pieces pos)
 
   let checkers { st = { checkers_bb; _ }; _ } = checkers_bb
 
@@ -240,10 +237,10 @@ module Position = struct
     Array.set board (Types.square_to_enum sq) (Some piece);
 
     Array.set by_type_bb piece_type_enum
-      (Bitboard.bb_or_sq (Array.get by_type_bb piece_type_enum) sq);
+      (BB.bb_or_sq (Array.get by_type_bb piece_type_enum) sq);
 
     Array.set by_colour_bb colour_enum
-      (Bitboard.bb_or_sq (Array.get by_colour_bb colour_enum) sq);
+      (BB.bb_or_sq (Array.get by_colour_bb colour_enum) sq);
 
     Array.set piece_count piece_enum
       (Int.succ (Array.get piece_count piece_enum))
@@ -258,10 +255,10 @@ module Position = struct
         let colour_enum = Types.colour_to_enum @@ Types.color_of_piece piece in
 
         Array.set by_type_bb piece_type_enum
-          (Bitboard.bb_xor_sq (Array.get by_type_bb piece_type_enum) sq);
+          (BB.bb_xor_sq (Array.get by_type_bb piece_type_enum) sq);
 
         Array.set by_colour_bb colour_enum
-          (Bitboard.bb_xor_sq (Array.get by_colour_bb colour_enum) sq);
+          (BB.bb_xor_sq (Array.get by_colour_bb colour_enum) sq);
 
         Array.set board (Types.square_to_enum sq) None;
 
@@ -272,17 +269,17 @@ module Position = struct
   let move_piece { board; by_type_bb; by_colour_bb; _ } src dst =
     match Array.get board (Types.square_to_enum src) with
     | Some piece ->
-        let src_dest = Bitboard.square_bb src |> Bitboard.sq_or_bb dst in
+        let src_dest = BB.square_bb src |> BB.sq_or_bb dst in
         let piece_type_enum =
           Types.piece_type_to_enum @@ Types.type_of_piece piece
         in
         let colour_enum = Types.colour_to_enum @@ Types.color_of_piece piece in
 
         Array.set by_type_bb piece_type_enum
-          (Bitboard.bb_xor (Array.get by_type_bb piece_type_enum) src_dest);
+          (BB.bb_xor (Array.get by_type_bb piece_type_enum) src_dest);
 
         Array.set by_colour_bb colour_enum
-          (Bitboard.bb_xor (Array.get by_colour_bb colour_enum) src_dest);
+          (BB.bb_xor (Array.get by_colour_bb colour_enum) src_dest);
 
         Array.set board (Types.square_to_enum src) None;
         Array.set board (Types.square_to_enum dst) (Some piece)
@@ -373,10 +370,9 @@ module Position = struct
                    let piece_type = Types.type_of_piece piece in
                    if
                      (not (Types.equal_piece_type piece_type Types.PAWN))
-                     && Bitboard.bb_not_zero
-                        @@ (Bitboard.attacks_bb_occupied piece_type s1
-                              Bitboard.empty
-                           |> Bitboard.sq_and_bb s2)
+                     && BB.bb_not_zero
+                        @@ (BB.attacks_bb_occupied piece_type s1 BB.empty
+                           |> BB.sq_and_bb s2)
                    then (
                      let piece_enum = Types.piece_to_enum piece in
                      let m = Types.mk_move s2 s1 in
@@ -443,10 +439,9 @@ module Position = struct
        other in chess960. *)
     let path =
       BitboardInfix.(
-        (Bitboard.between_bb rook_sq rook_dest_sq
-        || Bitboard.between_bb king_sq king_dest_sq)
-        & Bitboard.bb_not
-            (Bitboard.square_bb king_sq || Bitboard.square_bb rook_sq))
+        (BB.between_bb rook_sq rook_dest_sq
+        || BB.between_bb king_sq king_dest_sq)
+        & BB.bb_not (BB.square_bb king_sq || BB.square_bb rook_sq))
     in
     Array.set castling_path cr_enum path;
     { pos with st }
@@ -466,45 +461,41 @@ module Position = struct
        not in the way. *)
     let snipers =
       BitboardInfix.(
-        (Bitboard.attacks_bb Types.ROOK king_sq
+        (BB.attacks_bb Types.ROOK king_sq
          & pieces_of_pts pos [ Types.QUEEN; Types.ROOK ]
-        || Bitboard.attacks_bb Types.BISHOP king_sq
+        || BB.attacks_bb Types.BISHOP king_sq
            & pieces_of_pts pos [ Types.QUEEN; Types.BISHOP ])
         & pieces_of_colour pos other_c)
     in
-    let occupancy = Bitboard.bb_xor (pieces pos) snipers in
+    let occupancy = BB.bb_xor (pieces pos) snipers in
     let rec do_snipers snipers blockers pinners =
-      if Bitboard.bb_not_zero snipers then
-        let sniper_bb, others = Bitboard.pop_lsb snipers in
-        let sniper_sq = Bitboard.bb_to_square sniper_bb in
+      if BB.bb_not_zero snipers then
+        let sniper_bb, others = BB.pop_lsb snipers in
+        let sniper_sq = BB.bb_to_square sniper_bb in
         (* This will not include the sniper itself as it won't be in
            `occupancy` *)
         let candidate_blockers =
-          Bitboard.between_bb king_sq sniper_sq |> Bitboard.bb_and occupancy
+          BB.between_bb king_sq sniper_sq |> BB.bb_and occupancy
         in
         let blockers, pinners =
           (* Check if there is exactly one piece between the sniper and the
              king *)
           if
-            Bitboard.bb_not_zero candidate_blockers
-            && not (Bitboard.more_than_one candidate_blockers)
+            BB.bb_not_zero candidate_blockers
+            && not (BB.more_than_one candidate_blockers)
           then
-            let blockers = Bitboard.bb_and blockers candidate_blockers in
+            let blockers = BB.bb_and blockers candidate_blockers in
             (* If the piece is ours, then the sniper is pinning it to our
                king*)
-            if
-              Bitboard.bb_not_zero
-              @@ Bitboard.bb_and candidate_blockers our_pieces
-            then (blockers, Bitboard.bb_or pinners sniper_bb)
+            if BB.bb_not_zero @@ BB.bb_and candidate_blockers our_pieces then
+              (blockers, BB.bb_or pinners sniper_bb)
             else (blockers, pinners)
           else (blockers, pinners)
         in
         do_snipers others blockers pinners
       else (blockers, pinners)
     in
-    let blockers_bb, pinners_bb =
-      do_snipers snipers Bitboard.empty Bitboard.empty
-    in
+    let blockers_bb, pinners_bb = do_snipers snipers BB.empty BB.empty in
 
     Array.set blockers_for_king (Types.colour_to_enum c) blockers_bb;
     Array.set pinners (Types.colour_to_enum other_c) pinners_bb
@@ -525,51 +516,47 @@ module Position = struct
     let all_pieces = pieces pos in
     (* Populate the table with the squares from which the king may be attacked *)
     let bishop_attacks =
-      Bitboard.attacks_bb_occupied Types.BISHOP king_sq all_pieces
+      BB.attacks_bb_occupied Types.BISHOP king_sq all_pieces
     in
-    let rook_attacks =
-      Bitboard.attacks_bb_occupied Types.ROOK king_sq all_pieces
-    in
+    let rook_attacks = BB.attacks_bb_occupied Types.ROOK king_sq all_pieces in
     set_check_squares Types.PAWN
-      (Bitboard.pawn_attacks_bb_from_sq enemy_colour king_sq);
+      (BB.pawn_attacks_bb_from_sq enemy_colour king_sq);
     set_check_squares Types.KNIGHT
-      (Bitboard.attacks_bb_occupied Types.KNIGHT king_sq all_pieces);
+      (BB.attacks_bb_occupied Types.KNIGHT king_sq all_pieces);
     set_check_squares Types.BISHOP bishop_attacks;
     set_check_squares Types.ROOK rook_attacks;
-    set_check_squares Types.QUEEN (Bitboard.bb_or bishop_attacks rook_attacks);
-    set_check_squares Types.KING Bitboard.empty
+    set_check_squares Types.QUEEN (BB.bb_or bishop_attacks rook_attacks);
+    set_check_squares Types.KING BB.empty
 
   let attackers_to_occupied pos sq occupied =
     let pieces_of_colour_and_pt = pieces_of_colour_and_pt pos in
     let pieces_of_pt = pieces_of_pt pos in
     let pieces_of_pts = pieces_of_pts pos in
 
-    Bitboard.pawn_attacks_bb_from_sq Types.BLACK sq
-    |> Bitboard.bb_and (pieces_of_colour_and_pt Types.WHITE Types.PAWN)
-    |> Bitboard.bb_or
-         (Bitboard.pawn_attacks_bb_from_sq Types.WHITE sq
-         |> Bitboard.bb_and (pieces_of_colour_and_pt Types.BLACK Types.PAWN))
-    |> Bitboard.bb_or
-         (Bitboard.attacks_bb Types.KNIGHT sq
-         |> Bitboard.bb_and (pieces_of_pt Types.KNIGHT))
-    |> Bitboard.bb_or
-         (Bitboard.attacks_bb_occupied Types.ROOK sq occupied
-         |> Bitboard.bb_and (pieces_of_pts [ Types.ROOK; Types.QUEEN ]))
-    |> Bitboard.bb_or
-         (Bitboard.attacks_bb_occupied Types.BISHOP sq occupied
-         |> Bitboard.bb_and (pieces_of_pts [ Types.BISHOP; Types.QUEEN ]))
-    |> Bitboard.bb_or
-         (Bitboard.attacks_bb Types.KING sq
-         |> Bitboard.bb_and (pieces_of_pt Types.KING))
+    BB.pawn_attacks_bb_from_sq Types.BLACK sq
+    |> BB.bb_and (pieces_of_colour_and_pt Types.WHITE Types.PAWN)
+    |> BB.bb_or
+         (BB.pawn_attacks_bb_from_sq Types.WHITE sq
+         |> BB.bb_and (pieces_of_colour_and_pt Types.BLACK Types.PAWN))
+    |> BB.bb_or
+         (BB.attacks_bb Types.KNIGHT sq |> BB.bb_and (pieces_of_pt Types.KNIGHT))
+    |> BB.bb_or
+         (BB.attacks_bb_occupied Types.ROOK sq occupied
+         |> BB.bb_and (pieces_of_pts [ Types.ROOK; Types.QUEEN ]))
+    |> BB.bb_or
+         (BB.attacks_bb_occupied Types.BISHOP sq occupied
+         |> BB.bb_and (pieces_of_pts [ Types.BISHOP; Types.QUEEN ]))
+    |> BB.bb_or
+         (BB.attacks_bb Types.KING sq |> BB.bb_and (pieces_of_pt Types.KING))
 
   let attackers_to_sq pos sq = attackers_to_occupied pos sq (pieces pos)
 
   (* TODO: Unit test this *)
   let set_state ({ st; side_to_move; piece_count; _ } as pos) =
     let rec do_pieces pieces_bb (key, pawn_key, white_npm, black_npm) =
-      if Bitboard.bb_not_zero pieces_bb then
-        let sq_bb, rest = Bitboard.pop_lsb pieces_bb in
-        let sq = Bitboard.bb_to_square sq_bb in
+      if BB.bb_not_zero pieces_bb then
+        let sq_bb, rest = BB.pop_lsb pieces_bb in
+        let sq = BB.bb_to_square sq_bb in
         let sq_enum = Types.square_to_enum sq in
         let piece = piece_on_exn pos sq in
         let piece_enum = Types.piece_to_enum piece in
@@ -598,8 +585,7 @@ module Position = struct
     in
     let checkers_bb =
       attackers_to_sq pos (square_of_pt_and_colour pos Types.KING side_to_move)
-      |> Bitboard.bb_and
-           (pieces_of_colour pos (Types.other_colour side_to_move))
+      |> BB.bb_and (pieces_of_colour pos (Types.other_colour side_to_move))
     in
     set_check_info pos;
     let { castling_rights; ep_square; non_pawn_material; _ } = st in
@@ -669,9 +655,8 @@ module Position = struct
         Types.sq_sub_dir dst (Types.pawn_push_direction us) |> Stdlib.Option.get
       in
       let occupied =
-        pieces pos |> Bitboard.sq_xor_bb src
-        |> Bitboard.sq_xor_bb captured_sq
-        |> Bitboard.sq_or_bb dst
+        pieces pos |> BB.sq_xor_bb src |> BB.sq_xor_bb captured_sq
+        |> BB.sq_or_bb dst
       in
       assert (Types.equal_square dst (Stdlib.Option.get @@ ep_square pos));
       assert (
@@ -682,13 +667,13 @@ module Position = struct
           (Types.mk_piece them Types.PAWN));
       assert (piece_on pos dst |> Option.is_none);
       (* Test that the king is not in ray of an enemy slider. *)
-      Bitboard.bb_is_empty
-        (Bitboard.attacks_bb_occupied Types.ROOK king_sq occupied
-        |> Bitboard.bb_and
+      BB.bb_is_empty
+        (BB.attacks_bb_occupied Types.ROOK king_sq occupied
+        |> BB.bb_and
              (pieces_of_colour_and_pts pos them [ Types.QUEEN; Types.ROOK ]))
-      && Bitboard.bb_is_empty
-           (Bitboard.attacks_bb_occupied Types.BISHOP king_sq occupied
-           |> Bitboard.bb_and
+      && BB.bb_is_empty
+           (BB.attacks_bb_occupied Types.BISHOP king_sq occupied
+           |> BB.bb_and
                 (pieces_of_colour_and_pts pos them
                    [ Types.QUEEN; Types.BISHOP ])))
     else if Types.equal_move_type (Types.get_move_type m) Types.CASTLING then
@@ -713,8 +698,8 @@ module Position = struct
         if Types.equal_square curr_sq src then true
         else if
           attackers_to_sq pos curr_sq
-          |> Bitboard.bb_and @@ pieces_of_colour pos them
-          |> Bitboard.bb_not_zero
+          |> BB.bb_and @@ pieces_of_colour pos them
+          |> BB.bb_not_zero
         then false
         else is_path_safe (Types.sq_plus_dir curr_sq step |> Stdlib.Option.get)
       in
@@ -723,24 +708,23 @@ module Position = struct
          an enemy queen on A1 when the rook is on B1. *)
       is_path_safe dst
       && ((not chess960)
-         || Bitboard.bb_is_empty
-              (blockers_for_king pos us
-              |> Bitboard.sq_and_bb @@ Types.move_dst m))
+         || BB.bb_is_empty
+              (blockers_for_king pos us |> BB.sq_and_bb @@ Types.move_dst m))
     else if
       Types.equal_piece_type Types.KING
       @@ Types.type_of_piece @@ piece_on_exn pos src
     then
       (* If the moving piece is a king, check whether the destination square is
          attacked by the opponent. *)
-      attackers_to_occupied pos dst (pieces pos |> Bitboard.sq_xor_bb src)
-      |> Bitboard.bb_and @@ pieces_of_colour pos them
-      |> Bitboard.bb_is_empty
+      attackers_to_occupied pos dst (pieces pos |> BB.sq_xor_bb src)
+      |> BB.bb_and @@ pieces_of_colour pos them
+      |> BB.bb_is_empty
     else
       (* We have a non-king move, it would be legal as long as the piece is
          not pinned. If it is, then it needs to be moving along the ray between
          the king and the pinner. *)
-      Bitboard.bb_and_sq (blockers_for_king pos us) src |> Bitboard.bb_is_empty
-      || Bitboard.aligned src dst (square_of_pt_and_colour pos Types.KING us)
+      BB.bb_and_sq (blockers_for_king pos us) src |> BB.bb_is_empty
+      || BB.aligned src dst (square_of_pt_and_colour pos Types.KING us)
 
   (* Takes a random move and tests whether the move is
      pseudo-legal. It is used to validate moves from TT that can be corrupted
@@ -771,25 +755,21 @@ module Position = struct
           if not @@ Types.equal_colour us @@ Types.color_of_piece piece then
             false
             (* If the destination square is occupied by a friendly piece *)
-          else if Bitboard.bb_not_zero (Bitboard.bb_and_sq our_pieces dst) then
-            false
+          else if BB.bb_not_zero (BB.bb_and_sq our_pieces dst) then false
           else if
             (* Handle pawn moves:
                1. This can't be a promotion, hence the destination cannot be
                on the 1st and last ranks *)
             Types.equal_piece_type piece_type Types.PAWN
-            && Bitboard.bb_not_zero
-                 (Bitboard.bb_or Bitboard.rank_8 Bitboard.rank_1
-                 |> Bitboard.sq_and_bb dst)
+            && BB.bb_not_zero (BB.bb_or BB.rank_8 BB.rank_1 |> BB.sq_and_bb dst)
           then false
           else if
             (* 2. It must be either a capture, a single push, or double push *)
             Types.equal_piece_type piece_type Types.PAWN
             (* Not a capture *)
-            && Bitboard.bb_is_empty
-                 (Bitboard.pawn_attacks_bb_from_sq us src
-                 |> Bitboard.bb_and their_pieces
-                 |> Bitboard.sq_and_bb dst)
+            && BB.bb_is_empty
+                 (BB.pawn_attacks_bb_from_sq us src
+                 |> BB.bb_and their_pieces |> BB.sq_and_bb dst)
             (* Not a single push *)
             && (not
                   (Types.equal_square
@@ -816,35 +796,34 @@ module Position = struct
             (* If its not a pawn, then the destination square must be a
                square that it attacks. *)
             (not @@ Types.equal_piece_type piece_type Types.PAWN)
-            && Bitboard.bb_is_empty
-                 (Bitboard.attacks_bb_occupied piece_type src all_pieces
-                 |> Bitboard.sq_and_bb dst)
+            && BB.bb_is_empty
+                 (BB.attacks_bb_occupied piece_type src all_pieces
+                 |> BB.sq_and_bb dst)
           then false
             (* Evasions generator already takes care to avoid some kind of
                illegal moves and legal() relies on this. We therefore have
                to take care that the same kind of moves are filtered out
                here. *)
-          else if Bitboard.bb_not_zero @@ checkers pos then
+          else if BB.bb_not_zero @@ checkers pos then
             let checkers' = checkers pos in
             if not @@ Types.equal_piece_type Types.KING piece_type then
               (* There is more than one checker, hence moving the king
                  cannot be legal. *)
-              if Bitboard.more_than_one checkers' then false
+              if BB.more_than_one checkers' then false
               else
                 (* Since we are not moving the king, we must either capture
                    the attacker or interpose the check. *)
-                Bitboard.bb_not_zero
-                  (Bitboard.between_bb
+                BB.bb_not_zero
+                  (BB.between_bb
                      (square_of_pt_and_colour pos Types.KING us)
-                     (Bitboard.lsb checkers' |> Bitboard.bb_to_square)
-                  |> Bitboard.sq_and_bb dst)
+                     (BB.lsb checkers' |> BB.bb_to_square)
+                  |> BB.sq_and_bb dst)
             else
               (* Ensure that we are not moving the king to another attacked
                  square. *)
-              Bitboard.bb_is_empty
-                (attackers_to_occupied pos dst
-                   (Bitboard.bb_xor_sq all_pieces src)
-                |> Bitboard.bb_and their_pieces)
+              BB.bb_is_empty
+                (attackers_to_occupied pos dst (BB.bb_xor_sq all_pieces src)
+                |> BB.bb_and their_pieces)
           else true)
 
   (* Tests whether a pseudo-legal move gives a check *)
@@ -864,13 +843,10 @@ module Position = struct
 
         (* Direct check? i.e. the piece moves to a square where it
            checks the enemy king. *)
-        if Bitboard.bb_not_zero (check_squares pos pt |> Bitboard.sq_and_bb dst)
-        then true
+        if BB.bb_not_zero (check_squares pos pt |> BB.sq_and_bb dst) then true
           (* Discovered check? If the enemy king's blocker moves away from
              the ray so it no longer shields the king. *)
-        else if
-          Bitboard.bb_not_zero
-            (blockers_for_king pos them |> Bitboard.sq_and_bb src)
+        else if BB.bb_not_zero (blockers_for_king pos them |> BB.sq_and_bb src)
         then
           (* If the piece is no longer aligned with the enemy king OR
              the moved piece is a KING and he is castling away. Now, for
@@ -878,7 +854,7 @@ module Position = struct
              that the enemy king is on the same rank as the other king, and
              is shielding a check from the rook, hence, castling would
              definitely deliver a check. *)
-          (not @@ Bitboard.aligned src dst their_king_sq)
+          (not @@ BB.aligned src dst their_king_sq)
           || (Types.equal_move_type Types.CASTLING @@ Types.get_move_type m)
         else
           match Types.get_move_type m with
@@ -887,12 +863,12 @@ module Position = struct
           | Types.NORMAL -> false
           | Types.PROMOTION ->
               (* Will a newly promoted piece directly attack the king? *)
-              Bitboard.bb_not_zero
-                (Bitboard.attacks_bb_occupied
+              BB.bb_not_zero
+                (BB.attacks_bb_occupied
                    (Stdlib.Option.get @@ Types.get_ppt m)
                    dst
-                   (pieces pos |> Bitboard.sq_xor_bb src)
-                |> Bitboard.sq_and_bb their_king_sq)
+                   (pieces pos |> BB.sq_xor_bb src)
+                |> BB.sq_and_bb their_king_sq)
           | Types.EN_PASSANT ->
               (* We have already handled the normal checks, here we just need
                  to see if the removal of the captured pawn delivers a discovered
@@ -902,19 +878,19 @@ module Position = struct
                   ~rank:(Types.rank_of_sq src)
               in
               let b =
-                pieces pos |> Bitboard.sq_xor_bb src
-                |> Bitboard.sq_xor_bb cap_sq |> Bitboard.sq_or_bb dst
+                pieces pos |> BB.sq_xor_bb src |> BB.sq_xor_bb cap_sq
+                |> BB.sq_or_bb dst
               in
-              Bitboard.bb_or
-                (Bitboard.attacks_bb_occupied Types.ROOK their_king_sq b
-                |> Bitboard.bb_and
+              BB.bb_or
+                (BB.attacks_bb_occupied Types.ROOK their_king_sq b
+                |> BB.bb_and
                      (pieces_of_colour_and_pts pos us
                         [ Types.QUEEN; Types.ROOK ]))
-                (Bitboard.attacks_bb_occupied Types.BISHOP their_king_sq b
-                |> Bitboard.bb_and
+                (BB.attacks_bb_occupied Types.BISHOP their_king_sq b
+                |> BB.bb_and
                      (pieces_of_colour_and_pts pos us
                         [ Types.QUEEN; Types.BISHOP ]))
-              |> Bitboard.bb_not_zero
+              |> BB.bb_not_zero
           | Types.CASTLING ->
               (* We have the KING on the src sq and the ROOK on the dst sq,
                  we just need to determine if a ROOK on its new square would
@@ -927,8 +903,7 @@ module Position = struct
                    else Types.D1)
               in
               check_squares pos Types.ROOK
-              |> Bitboard.sq_and_bb rook_dst
-              |> Bitboard.bb_not_zero)
+              |> BB.sq_and_bb rook_dst |> BB.bb_not_zero)
 
   (* Performs some consistency checks for the position object
      and raise an assert if something wrong is detected.
@@ -969,14 +944,14 @@ module Position = struct
          attack on our turn. *)
       assert (
         attackers_to_sq pos (square_of_pt_and_colour pos Types.KING them)
-        |> Bitboard.bb_and (pieces_of_colour pos side_to_move)
-        |> Bitboard.bb_is_empty);
+        |> BB.bb_and (pieces_of_colour pos side_to_move)
+        |> BB.bb_is_empty);
 
       (* No pawns on the first and eight rank *)
       assert (
         pieces_of_pt pos Types.PAWN
-        |> Bitboard.bb_and (Bitboard.bb_or Bitboard.rank_1 Bitboard.rank_8)
-        |> Bitboard.bb_is_empty);
+        |> BB.bb_and (BB.bb_or BB.rank_1 BB.rank_8)
+        |> BB.bb_is_empty);
 
       assert (Array.get piece_count (Types.piece_to_enum Types.W_PAWN) <= 8);
       assert (Array.get piece_count (Types.piece_to_enum Types.B_PAWN) <= 8);
@@ -986,18 +961,18 @@ module Position = struct
       (* Pieces of both colours do not overlap *)
       assert (
         pieces_of_colour pos Types.WHITE
-        |> Bitboard.bb_and (pieces_of_colour pos Types.BLACK)
-        |> Bitboard.bb_is_empty);
+        |> BB.bb_and (pieces_of_colour pos Types.BLACK)
+        |> BB.bb_is_empty);
 
       (* white | black == all pieces *)
       assert (
-        Bitboard.equal
+        BB.equal
           (pieces_of_colour pos Types.WHITE
-          |> Bitboard.bb_or (pieces_of_colour pos Types.BLACK))
+          |> BB.bb_or (pieces_of_colour pos Types.BLACK))
           (pieces pos));
 
-      assert (Bitboard.popcount (pieces_of_colour pos Types.WHITE) <= 16);
-      assert (Bitboard.popcount (pieces_of_colour pos Types.BLACK) <= 16);
+      assert (BB.popcount (pieces_of_colour pos Types.WHITE) <= 16);
+      assert (BB.popcount (pieces_of_colour pos Types.BLACK) <= 16);
 
       (* Different piece types do not overlap *)
       List.iter
@@ -1006,15 +981,15 @@ module Position = struct
           if not @@ Types.equal_piece_type pt1 pt2 then
             assert (
               pieces_of_pt pos pt1
-              |> Bitboard.bb_and (pieces_of_pt pos pt2)
-              |> Bitboard.bb_is_empty));
+              |> BB.bb_and (pieces_of_pt pos pt2)
+              |> BB.bb_is_empty));
 
       (* Check piece counts *)
       List.iter Types.all_pieces ~f:(fun pc ->
           (* Check that piece counts are tracking the bitboards *)
           assert (
             count_by_piece pos pc
-            = Bitboard.popcount
+            = BB.popcount
               @@ pieces_of_colour_and_pt pos (Types.color_of_piece pc)
                    (Types.type_of_piece pc));
           (* Check that piece counts are tracking what's on the board *)
@@ -1096,11 +1071,11 @@ module Position = struct
       non_pawn_material = Array.copy non_pawn_material;
       (* These need to reinitialised *)
       key = UInt64.zero;
-      checkers_bb = Bitboard.empty;
-      blockers_for_king = Array.create ~len:2 Bitboard.empty;
-      pinners = Array.create ~len:2 Bitboard.empty;
+      checkers_bb = BB.empty;
+      blockers_for_king = Array.create ~len:2 BB.empty;
+      pinners = Array.create ~len:2 BB.empty;
       check_squares =
-        Array.create ~len:(List.length Types.all_piece_types) Bitboard.empty;
+        Array.create ~len:(List.length Types.all_piece_types) BB.empty;
       captured_piece = None;
       repetition = 0;
     }
@@ -1350,9 +1325,9 @@ module Position = struct
             (* FIXME: This doesn't seem to be a nice way to check that a pawn
                advanced by 2 squares *)
             Types.square_to_enum src lxor Types.square_to_enum dst = 16
-            && Bitboard.bb_not_zero
-               @@ Bitboard.bb_and
-                    (Bitboard.pawn_attacks_bb_from_sq us candidate_ep_sq)
+            && BB.bb_not_zero
+               @@ BB.bb_and
+                    (BB.pawn_attacks_bb_from_sq us candidate_ep_sq)
                     (pieces_of_colour_and_pt pos them Types.PAWN)
           then
             ( { new_st with ep_square = Some candidate_ep_sq },
@@ -1420,8 +1395,8 @@ module Position = struct
     let checkers_bb =
       if gives_check then
         attackers_to_sq pos (square_of_pt_and_colour pos Types.KING them)
-        |> Bitboard.bb_and (pieces_of_colour pos us)
-      else Bitboard.empty
+        |> BB.bb_and (pieces_of_colour pos us)
+      else BB.empty
     in
 
     let new_st =
@@ -1533,7 +1508,7 @@ module Position = struct
 
   let do_null_move ({ st; _ } as pos) =
     (* We can't do a null move when the player is in check *)
-    assert (Bitboard.bb_is_empty @@ checkers pos);
+    assert (BB.bb_is_empty @@ checkers pos);
     let new_st = new_full_copy_st_from_prev st in
 
     (* TODO: NNUE stuff *)
@@ -1577,7 +1552,7 @@ module Position = struct
   (* The only way to undo a null move *)
   let undo_null_move ({ st; side_to_move; _ } as pos) =
     (* No one should be checked before/after applying a null move *)
-    assert (Bitboard.bb_is_empty @@ checkers pos);
+    assert (BB.bb_is_empty @@ checkers pos);
 
     {
       pos with
@@ -1633,28 +1608,24 @@ module Position = struct
       let them = Types.other_colour stm in
       (* Occupied contains all the pieces on the board, we make sure that
          the attackers contain only pieces that still exist. *)
-      let attackers = Bitboard.bb_and attackers occupied in
-      let stm_attackers =
-        Bitboard.bb_and attackers (pieces_of_colour pos stm)
-      in
+      let attackers = BB.bb_and attackers occupied in
+      let stm_attackers = BB.bb_and attackers (pieces_of_colour pos stm) in
 
       (* If stm has no more attackers then give up: stm loses *)
-      if Bitboard.bb_is_empty stm_attackers then res
+      if BB.bb_is_empty stm_attackers then res
       else
         (* Don't allow pinned pieces to attack as long as there are
            pinners on their original square. *)
         let stm_attackers =
-          if Bitboard.bb_not_zero (pinners pos them |> Bitboard.bb_and occupied)
-          then
-            Bitboard.bb_and stm_attackers
-              (Bitboard.bb_not @@ blockers_for_king pos stm)
+          if BB.bb_not_zero (pinners pos them |> BB.bb_and occupied) then
+            BB.bb_and stm_attackers (BB.bb_not @@ blockers_for_king pos stm)
           else stm_attackers
         in
 
         (* Check again if there are any attackers left *)
         (* TODO: Can I combine the two checks? Try this after adding unit
            tests *)
-        if Bitboard.bb_is_empty stm_attackers then res
+        if BB.bb_is_empty stm_attackers then res
         else
           (* Flip the result since the stm still has attackers, in the
              recursive call if the other side has no more pieces, then this
@@ -1664,95 +1635,85 @@ module Position = struct
              need to generate all the attackers in one go since we might not
              require all of them. *)
           let pawn_attackers =
-            Bitboard.bb_and stm_attackers (pieces_of_pt pos Types.PAWN)
+            BB.bb_and stm_attackers (pieces_of_pt pos Types.PAWN)
           in
           let knight_attackers =
-            Bitboard.bb_and stm_attackers (pieces_of_pt pos Types.KNIGHT)
+            BB.bb_and stm_attackers (pieces_of_pt pos Types.KNIGHT)
           in
           let bishop_attackers =
-            Bitboard.bb_and stm_attackers (pieces_of_pt pos Types.BISHOP)
+            BB.bb_and stm_attackers (pieces_of_pt pos Types.BISHOP)
           in
           let rook_attackers =
-            Bitboard.bb_and stm_attackers (pieces_of_pt pos Types.ROOK)
+            BB.bb_and stm_attackers (pieces_of_pt pos Types.ROOK)
           in
           let queen_attackers =
-            Bitboard.bb_and stm_attackers (pieces_of_pt pos Types.QUEEN)
+            BB.bb_and stm_attackers (pieces_of_pt pos Types.QUEEN)
           in
 
           (* Locate and remove the next least valuable attacker, and add to
              the bitboard 'attackers' any X-ray attackers behind it. *)
-          if Bitboard.bb_not_zero pawn_attackers then
+          if BB.bb_not_zero pawn_attackers then
             let swap = Types.pawn_value - swap in
             (* If giving up the least valuable piece isn't good enough, then
                nothing will be. The same logic applies in the other branches
                too. *)
             if swap < res then res
             else
-              let occupied =
-                Bitboard.bb_xor occupied (Bitboard.lsb pawn_attackers)
-              in
+              let occupied = BB.bb_xor occupied (BB.lsb pawn_attackers) in
               (* Since pawns attack like bishops, them moving could
                  unleash other attackers that attack diagonally. *)
               let attackers =
-                Bitboard.bb_or attackers
-                  (Bitboard.attacks_bb_occupied Types.BISHOP dst occupied
-                  |> Bitboard.bb_and
+                BB.bb_or attackers
+                  (BB.attacks_bb_occupied Types.BISHOP dst occupied
+                  |> BB.bb_and
                      @@ pieces_of_pts pos [ Types.QUEEN; Types.BISHOP ])
               in
               helper stm attackers occupied swap res
-          else if Bitboard.bb_not_zero knight_attackers then
+          else if BB.bb_not_zero knight_attackers then
             let swap = Types.knight_value - swap in
             if swap < res then res
             else
-              let occupied =
-                Bitboard.bb_xor occupied (Bitboard.lsb knight_attackers)
-              in
+              let occupied = BB.bb_xor occupied (BB.lsb knight_attackers) in
               (* By moving a knight, this will not unleash more attackers
                  on the destination square. *)
               helper stm attackers occupied swap res
-          else if Bitboard.bb_not_zero bishop_attackers then
+          else if BB.bb_not_zero bishop_attackers then
             let swap = Types.bishop_value - swap in
             if swap < res then res
             else
-              let occupied =
-                Bitboard.bb_xor occupied (Bitboard.lsb bishop_attackers)
-              in
+              let occupied = BB.bb_xor occupied (BB.lsb bishop_attackers) in
               let attackers =
-                Bitboard.bb_or attackers
-                  (Bitboard.attacks_bb_occupied Types.BISHOP dst occupied
-                  |> Bitboard.bb_and
+                BB.bb_or attackers
+                  (BB.attacks_bb_occupied Types.BISHOP dst occupied
+                  |> BB.bb_and
                      @@ pieces_of_pts pos [ Types.QUEEN; Types.BISHOP ])
               in
               helper stm attackers occupied swap res
-          else if Bitboard.bb_not_zero rook_attackers then
+          else if BB.bb_not_zero rook_attackers then
             let swap = Types.rook_value - swap in
             if swap < res then res
             else
-              let occupied =
-                Bitboard.bb_xor occupied (Bitboard.lsb rook_attackers)
-              in
+              let occupied = BB.bb_xor occupied (BB.lsb rook_attackers) in
               let attackers =
-                Bitboard.bb_or attackers
-                  (Bitboard.attacks_bb_occupied Types.ROOK dst occupied
-                  |> Bitboard.bb_and
-                     @@ pieces_of_pts pos [ Types.QUEEN; Types.ROOK ])
+                BB.bb_or attackers
+                  (BB.attacks_bb_occupied Types.ROOK dst occupied
+                  |> BB.bb_and @@ pieces_of_pts pos [ Types.QUEEN; Types.ROOK ]
+                  )
               in
               helper stm attackers occupied swap res
-          else if Bitboard.bb_not_zero queen_attackers then
+          else if BB.bb_not_zero queen_attackers then
             let swap = Types.queen_value - swap in
             if swap < res then res
             else
-              let occupied =
-                Bitboard.bb_xor occupied (Bitboard.lsb queen_attackers)
-              in
+              let occupied = BB.bb_xor occupied (BB.lsb queen_attackers) in
               let attackers =
-                Bitboard.bb_or attackers
-                  (Bitboard.attacks_bb_occupied Types.ROOK dst occupied
-                  |> Bitboard.bb_and
-                     @@ pieces_of_pts pos [ Types.QUEEN; Types.ROOK ])
-                |> Bitboard.bb_or
-                     (Bitboard.attacks_bb_occupied Types.BISHOP dst occupied
-                     |> Bitboard.bb_and
+                BB.bb_or attackers
+                  (BB.attacks_bb_occupied Types.ROOK dst occupied
+                  |> BB.bb_and @@ pieces_of_pts pos [ Types.QUEEN; Types.ROOK ]
+                  )
+                |> BB.bb_or
+                     (BB.attacks_bb_occupied Types.BISHOP dst occupied
+                     |> BB.bb_and
                         @@ pieces_of_pts pos [ Types.QUEEN; Types.BISHOP ])
               in
               helper stm attackers occupied swap res
@@ -1760,9 +1721,8 @@ module Position = struct
             (* KING:
                If we "capture" with the king but the opponent still has attackers,
                reverse the result. *)
-            Bitboard.bb_not_zero
-              (Bitboard.bb_and attackers
-              @@ Bitboard.bb_not (pieces_of_colour pos stm))
+            BB.bb_not_zero
+              (BB.bb_and attackers @@ BB.bb_not (pieces_of_colour pos stm))
           then res lxor 1
           else res
     in
@@ -1790,9 +1750,7 @@ module Position = struct
 
           (* Occupancy after exchanging once
              xoring `dst` is important for pinned piece logic *)
-          let occupied =
-            pieces pos |> Bitboard.sq_xor_bb src |> Bitboard.sq_xor_bb dst
-          in
+          let occupied = pieces pos |> BB.sq_xor_bb src |> BB.sq_xor_bb dst in
           let attackers = attackers_to_occupied pos dst occupied in
           (* Convert the int to bool *)
           helper side_to_move attackers occupied swap 1 <> 0)
