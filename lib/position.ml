@@ -39,7 +39,8 @@ module Position = struct
     pawn_key : key;
     non_pawn_material : Types.value array;
     castling_rights : int;
-    rule50 : int; (* 50-move rule counter, draw if this reaches 50 *)
+    (* 50-move rule counter, draw if this reaches 100 as we count in plies *)
+    rule50 : int;
     plies_from_null : int; (* TODO: What's this? *)
     (* En passant square, i.e. the square that the enemy pawn will land on
        after capturing en passant. This conveniently handles the case when
@@ -1754,6 +1755,102 @@ module Position = struct
           let attackers = attackers_to_occupied pos dst occupied in
           (* Convert the int to bool *)
           helper side_to_move attackers occupied swap 1 <> 0)
+
+  (*
+   * Tests whether the position is drawn by 50-move rule
+   * or by repetition. It does not detect stalemates.
+   *)
+  (* TODO: Document what the argument `ply` here means *)
+  let is_draw ({ st = { rule50; repetition; _ } } as pos) ply =
+    (* 50-move rule *)
+    (* TODO: Check that move list is not empty*)
+    (rule50 > 99 && (BB.bb_is_empty @@ checkers pos))
+    || (* Return a draw score if a position repeats once earlier but strictly
+          after the root, or repeats twice before or at the root. *)
+       (* Note that negative values represent 3-fold repetitions, and 0 means
+          that there was no repetition at all *)
+    (repetition <> 0 && repetition < ply)
+
+  (* Tests whether there has been at least one repetition
+     of positions since the last capture or pawn move. *)
+  let has_repeated { st = { rule50; plies_from_null; _ } as st; _ } =
+    let end_idx = Int.min rule50 plies_from_null in
+    let rec helper { repetition; previous; _ } idx =
+      if idx >= 4 then
+        if repetition <> 0 then true
+        else helper (Stdlib.Option.get previous) (idx - 1)
+      else false
+    in
+    helper st end_idx
+
+  (* Tests if the position has a move which draws by repetition,
+     or an earlier position has a move that directly reaches the current position. *)
+  (* TODO: Document the argument `ply` *)
+  let has_game_cycle
+      ({
+         st = { rule50; plies_from_null; key = original_key; previous; _ };
+         side_to_move;
+         _;
+       } as pos) ply =
+    let end_idx = Int.min rule50 plies_from_null in
+    if end_idx < 3 then false
+    else
+      let all_pieces = pieces pos in
+      let rec loop i stp =
+        if i <= end_idx then
+          let stp =
+            Stdlib.Option.get @@ (Stdlib.Option.get stp.previous).previous
+          in
+          (* The key of the move that would bring us from stp's position
+             to the current position *)
+          let move_key = UInt64.logxor original_key stp.key in
+          (* To see if the above move is a valid reversible move, look for it
+             in the cuckoo table. See if either H1 or H2 gives us the right hash. *)
+          let cuckoo_idx =
+            if UInt64.equal move_key (Array.get cuckoo @@ h1 move_key) then
+              Some (h1 move_key)
+            else if UInt64.equal move_key (Array.get cuckoo @@ h2 move_key) then
+              Some (h2 move_key)
+            else None
+          in
+          match cuckoo_idx with
+          | Some j ->
+              let move = Array.get cuckoo_move j in
+              let s1 = Types.move_src move in
+              let s2 = Types.move_dst move in
+
+              (* Check that the move is actually possible, i.e there are no obstacles
+                 between s1 and s2.
+                 NOTE: `between_bb` includes the second sq, that's why we xor `s2` *)
+              if
+                BB.bb_is_empty
+                  (BB.between_bb s1 s2 |> BB.sq_xor_bb s2
+                 |> BB.bb_and all_pieces)
+              then
+                (* Did this move occur after the root? *)
+                if ply > i then true
+                else if
+                  (* For nodes before or at the root, check that the move is a
+                     repetition rather than a move to the current position.
+                     In the cuckoo table, both moves Rc1c5 and Rc5c1 are stored
+                     in the same location, so we have to select which square to
+                     check.
+                     For repetitions before or at the root, require one more
+                     repetition by checking if the move was already repeated
+                     previously. *)
+                  Types.equal_colour side_to_move
+                  @@ Types.color_of_piece
+                       (piece_on_exn pos (if is_empty pos s1 then s2 else s1))
+                  && stp.repetition <> 0
+                then true
+                else loop (i + 2) stp
+              else failwith "TODO"
+          | None -> loop (i + 2) stp
+        else false
+      in
+      loop 3 (Stdlib.Option.get previous)
+
+  (* TODO: Implement `flip` after we implement `fen` function *)
 end
 
 let%test_unit "dummy_test" = ()
