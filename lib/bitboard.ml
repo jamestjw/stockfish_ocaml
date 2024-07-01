@@ -21,7 +21,7 @@ open Unsigned
 open Types
 open Utils
 
-module type BITBOARD = sig
+module Bitboard : sig
   type t
 
   val show : t -> string
@@ -107,9 +107,18 @@ module type BITBOARD = sig
 
   (* Number of pieces on a certain bitboard *)
   val popcount : t -> int
-end
+  val fold : init:'a -> f:('a -> t -> 'a) -> t -> 'a
+  val fold_sq : init:'a -> f:('a -> Types.square -> 'a) -> t -> 'a
 
-module Bitboard : BITBOARD = struct
+  module Infix : sig
+    type t
+
+    val ( & ) : t -> t -> t
+    val ( || ) : t -> t -> t
+    val ( ^ ) : t -> t -> t
+  end
+  with type t := t
+end = struct
   type t = UInt64.t
 
   let sexp_of_t t = Sexp.Atom (UInt64.to_string t)
@@ -806,12 +815,32 @@ module Bitboard : BITBOARD = struct
 
   let aligned s1 s2 s3 = bb_not_zero @@ bb_and_sq (line_bb s1 s2) s3
 
+  let fold ~init ~f bb =
+    let rec aux acc bb =
+      if bb_not_zero bb then
+        let b, bb = pop_lsb bb in
+        aux (f acc b) bb
+      else acc
+    in
+    aux init bb
+
+  let fold_sq ~init ~f bb =
+    fold ~init ~f:(fun acc bb -> f acc @@ bb_to_square bb) bb
+
+  module Infix = struct
+    let ( & ) = bb_and
+    let ( || ) = bb_or
+    let ( ^ ) = bb_xor
+  end
+
   (* Test of functions that we are not exposing outside of the module *)
   let%test_unit "test_lsb" =
     [%test_result: t] ~expect:(UInt64.of_int 0b0010)
       (lsb @@ UInt64.of_int 0b1010);
     [%test_result: t] ~expect:(UInt64.of_int 0) (lsb @@ UInt64.of_int 0);
-    [%test_result: t] ~expect:(UInt64.of_int 1) (lsb @@ UInt64.of_int 1)
+    [%test_result: t] ~expect:(UInt64.of_int 1) (lsb @@ UInt64.of_int 1);
+    [%test_result: t] ~expect:(UInt64.of_int 0b01000)
+      (lsb @@ UInt64.of_int 0b01000)
 
   let%test_unit "test_msb" =
     [%test_result: t] ~expect:(UInt64.of_int 0b00100000)
@@ -932,18 +961,8 @@ module Bitboard : BITBOARD = struct
     [%test_result: t] ~expect:expected_bb attacks
 end
 
-(* TODO: Embed this in the Bitboard module *)
-module BitboardInfix = struct
-  open Bitboard
-
-  type t = Bitboard.t
-
-  let ( & ) = bb_and
-  let ( || ) = bb_or
-  let ( ^ ) = bb_xor
-end
-
 let%test_unit "test_more_than_one" =
+  [%test_result: bool] ~expect:false (Bitboard.more_than_one Bitboard.empty);
   [%test_result: bool] ~expect:false
     (Bitboard.more_than_one @@ Bitboard.square_bb Types.E4);
   [%test_result: bool] ~expect:true (Bitboard.more_than_one Bitboard.rank_1);

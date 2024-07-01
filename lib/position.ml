@@ -439,7 +439,7 @@ module Position = struct
        current squares of the king and rook because the pieces may 'cross' each
        other in chess960. *)
     let path =
-      BitboardInfix.(
+      BB.Infix.(
         (BB.between_bb rook_sq rook_dest_sq
         || BB.between_bb king_sq king_dest_sq)
         & BB.bb_not (BB.square_bb king_sq || BB.square_bb rook_sq))
@@ -461,7 +461,7 @@ module Position = struct
     (* Snipers are enemy sliders that attack `king_sq` when other snipers are
        not in the way. *)
     let snipers =
-      BitboardInfix.(
+      BB.Infix.(
         (BB.attacks_bb Types.ROOK king_sq
          & pieces_of_pts pos [ Types.QUEEN; Types.ROOK ]
         || BB.attacks_bb Types.BISHOP king_sq
@@ -485,7 +485,7 @@ module Position = struct
             BB.bb_not_zero candidate_blockers
             && not (BB.more_than_one candidate_blockers)
           then
-            let blockers = BB.bb_and blockers candidate_blockers in
+            let blockers = BB.bb_or blockers candidate_blockers in
             (* If the piece is ours, then the sniper is pinning it to our
                king*)
             if BB.bb_not_zero @@ BB.bb_and candidate_blockers our_pieces then
@@ -1761,7 +1761,7 @@ module Position = struct
    * or by repetition. It does not detect stalemates.
    *)
   (* TODO: Document what the argument `ply` here means *)
-  let is_draw ({ st = { rule50; repetition; _ } } as pos) ply =
+  let is_draw ({ st = { rule50; repetition; _ }; _ } as pos) ply =
     (* 50-move rule *)
     (* TODO: Check that move list is not empty*)
     (rule50 > 99 && (BB.bb_is_empty @@ checkers pos))

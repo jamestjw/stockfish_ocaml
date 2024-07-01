@@ -35,6 +35,10 @@ module Types = struct
     | BLACK_OO -> 0b100
     | BLACK_OOO -> 0b1000
 
+  let castling_rights_for_colour = function
+    | WHITE -> [ WHITE_OO; WHITE_OOO ]
+    | BLACK -> [ BLACK_OO; BLACK_OOO ]
+
   let castling_right_num_combinations = 2 ** 4
 
   let is_kingside_castling = function
@@ -373,6 +377,9 @@ module Types = struct
 
   let sq_sub_dir sq dir =
     square_to_enum sq - direction_to_enum dir |> square_of_enum
+
+  let sq_sub_dir_twice sq dir =
+    match sq_sub_dir sq dir with Some res -> sq_sub_dir res dir | None -> None
 
   (* Swap A1 <-> A8 *)
   let flip_sq_rank sq =
