@@ -293,8 +293,6 @@ module Types = struct
     | 7 -> NORTH_WEST
     | _ -> failwith "Invalid direction"
 
-  (* for (int step : {-17, -15, -10, -6, 6, 10, 15, 17}) *)
-
   type knight_direction =
     | SOUTH_SOUTH_EAST
     | SOUTH_SOUTH_WEST
@@ -481,7 +479,7 @@ module Types = struct
   type move_type = NORMAL | PROMOTION | EN_PASSANT | CASTLING
   [@@deriving enum, ord, eq, sexp]
 
-  type move = int [@@deriving eq]
+  type move = { data : int; value : int } [@@deriving eq, ord, sexp]
 
   (* A move needs 16 bits to be stored
      bit  0- 5: destination square (from 0 to 63)
@@ -492,7 +490,7 @@ module Types = struct
      NOTE: en passant bit is set only when a pawn can be captured *)
   (* TODO: If necessary, I can create another version of this function that
      handles the 'fast' case, i.e. for normal move types without ppt. *)
-  let mk_move ?(move_type = NORMAL) ?ppt dst src =
+  let mk_move ?(move_type = NORMAL) ?ppt ?(value = 0) dst src =
     let special_move_flag = move_type_to_enum move_type in
 
     (* TODO: Perhaps it would be prudent to ensure that this only `Some`
@@ -509,29 +507,34 @@ module Types = struct
     (* Used for piping *)
     let shift_left = Fn.flip Int.shift_left in
 
-    Int.shift_left special_move_flag 2
-    |> Int.bit_xor ppt_flag |> shift_left 6
-    |> Int.bit_xor (square_to_enum src)
-    |> shift_left 6
-    |> Int.bit_xor (square_to_enum dst)
+    let data =
+      Int.shift_left special_move_flag 2
+      |> Int.bit_xor ppt_flag |> shift_left 6
+      |> Int.bit_xor (square_to_enum src)
+      |> shift_left 6
+      |> Int.bit_xor (square_to_enum dst)
+    in
+    { data; value }
 
-  let none_move = 0
-  let null_move = 0b1000001 (* Same src and dest *)
-  let move_is_ok move = (not (move = none_move)) && not (move = null_move)
+  let move_value { value; _ } = value
+  let none_move = { data = 0; value = 0 }
+  let null_move = { data = 0b1000001; value = 0 } (* Same src and dest *)
 
-  let move_src move =
-    Int.shift_right_logical move 6
+  let move_is_ok move =
+    (not (equal_move move none_move)) && not (equal_move move null_move)
+
+  let move_src { data; _ } =
+    Int.shift_right_logical data 6
     |> Int.bit_and 0b111111 |> square_of_enum |> Stdlib.Option.get
 
-  let move_dst move =
-    Int.bit_and move 0b111111 |> square_of_enum |> Stdlib.Option.get
-  (* constexpr MoveType type_of() const { return MoveType(data & (3 << 14)); } *)
+  let move_dst { data; _ } =
+    Int.bit_and data 0b111111 |> square_of_enum |> Stdlib.Option.get
 
-  let get_move_type move =
-    Int.shift_right move 14 |> move_type_of_enum |> Stdlib.Option.get
+  let get_move_type { data; _ } =
+    Int.shift_right data 14 |> move_type_of_enum |> Stdlib.Option.get
 
-  let get_ppt move =
-    match Int.shift_right move 12 |> Int.bit_and 0b11 with
+  let get_ppt { data; _ } =
+    match Int.shift_right data 12 |> Int.bit_and 0b11 with
     | 0 -> Some KNIGHT
     | 1 -> Some BISHOP
     | 2 -> Some ROOK
