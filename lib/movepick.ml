@@ -60,30 +60,31 @@ module MovePick = struct
     val to_int : t -> int
   end
 
-  module type StatsEntry = sig
-    type t
+  module StatsEntry = struct
+    module type S = sig
+      type t
 
-    val add : t -> int -> t
-    val default : t
-    val bounds : int
-  end
+      val bounds : int
+      val default : t
+      val add : t -> int -> t
+    end
 
-  module StatsEntryMake (T : StatsEntryType) : StatsEntry with type t = T.t =
-  struct
-    type t = T.t
+    module Make (T : StatsEntryType) : S with type t = T.t = struct
+      type t = T.t
 
-    let default = T.default
-    let bounds = T.bounds
+      let bounds = T.bounds
+      let default = T.default
 
-    let add e bonus =
-      assert (Int.abs bonus <= bounds);
-      let abs_bonus = T.of_int @@ Int.abs bonus in
-      let bonus = T.of_int bonus in
-      let e =
-        T.add e @@ T.sub bonus (T.mul e (T.div abs_bonus @@ T.of_int bounds))
-      in
-      assert (Int.abs @@ T.to_int e <= bounds);
-      e
+      let add e bonus =
+        assert (Int.abs bonus <= bounds);
+        let abs_bonus = T.of_int @@ Int.abs bonus in
+        let bonus = T.of_int bonus in
+        let e =
+          T.add e @@ T.sub bonus (T.mul e (T.div abs_bonus @@ T.of_int bounds))
+        in
+        assert (Int.abs @@ T.to_int e <= bounds);
+        e
+    end
   end
 
   (* We will be using a Map as the underlying data structure *)
@@ -103,8 +104,8 @@ module MovePick = struct
       val find : t -> k -> v
     end
 
-    module Make (K : StatsKey) (E : StatsEntry) :
-      S with type k := K.t and type v = E.t = struct
+    module Make (K : StatsKey) (E : StatsEntry.S) :
+      S with type k := K.t and type v := E.t = struct
       module Map = Stdlib.Map.Make (K)
 
       type v = E.t
@@ -117,6 +118,20 @@ module MovePick = struct
       (* TODO: Decide if I want to make this data structure mutable or not *)
     end
   end
+
+  module MakeIntStatsEntry (T : sig
+    val bounds : int
+  end) =
+  StatsEntry.Make (struct
+    include Int
+
+    let default = 0
+    let bounds = T.bounds
+    let add = ( + )
+    let sub = ( - )
+    let mul = ( * )
+    let div = ( / )
+  end)
 
   (*
    * ButterflyHistory records how often quiet moves have been successful or unsuccessful
@@ -131,15 +146,8 @@ module MovePick = struct
 
         let compare = Poly.compare
       end)
-      (StatsEntryMake (struct
-        include Int
-
-        let default = 0
+      (MakeIntStatsEntry (struct
         let bounds = 7183
-        let add = ( + )
-        let sub = ( - )
-        let mul = ( * )
-        let div = ( / )
       end))
 
   (*
@@ -155,7 +163,7 @@ module MovePick = struct
 
         let compare = Poly.compare
       end)
-      (StatsEntryMake (struct
+      (StatsEntry.Make (struct
         type t = Types.move
 
         let default = Types.null_move
@@ -176,15 +184,8 @@ module MovePick = struct
 
         let compare = Poly.compare
       end)
-      (StatsEntryMake (struct
-        include Int
-
-        let default = 0
+      (MakeIntStatsEntry (struct
         let bounds = 10692
-        let add = ( + )
-        let sub = ( - )
-        let mul = ( * )
-        let div = ( / )
       end))
 
   (* PieceToHistory is like ButterflyHistory but is addressed by a move's [piece][to] *)
@@ -195,15 +196,8 @@ module MovePick = struct
 
         let compare = Poly.compare
       end)
-      (StatsEntryMake (struct
-        include Int
-
-        let default = 0
+      (MakeIntStatsEntry (struct
         let bounds = 29952
-        let add = ( + )
-        let sub = ( - )
-        let mul = ( * )
-        let div = ( / )
       end))
 
   (*
@@ -220,7 +214,7 @@ module MovePick = struct
 
         let compare = Poly.compare
       end)
-      (StatsEntryMake (struct
+      (StatsEntry.Make (struct
         type t = PieceToHistory.t
 
         let default = PieceToHistory.make ()
@@ -233,17 +227,6 @@ module MovePick = struct
         let to_int _ = failwith "not implemented"
       end))
 
-  module IntStatsEntry = StatsEntryMake (struct
-    include Int
-
-    let default = 0
-    let bounds = 8192
-    let add = ( + )
-    let sub = ( - )
-    let mul = ( * )
-    let div = ( / )
-  end)
-
   (* PawnHistory is addressed by the pawn structure and a move's [piece][to] *)
   module PawnHistory =
     Stats.Make
@@ -253,15 +236,8 @@ module MovePick = struct
 
         let compare = Poly.compare
       end)
-      (StatsEntryMake (struct
-        include Int
-
-        let default = 0
+      (MakeIntStatsEntry (struct
         let bounds = 8192
-        let add = ( + )
-        let sub = ( - )
-        let mul = ( * )
-        let div = ( / )
       end))
 
   (* CorrectionHistory is addressed by color and pawn structure *)
@@ -272,15 +248,8 @@ module MovePick = struct
 
         let compare = Poly.compare
       end)
-      (StatsEntryMake (struct
-        include Int
-
-        let default = 0
+      (MakeIntStatsEntry (struct
         let bounds = correction_history_limit
-        let add = ( + )
-        let sub = ( - )
-        let mul = ( * )
-        let div = ( / )
       end))
 
   type pick_type = NEXT | BEST
