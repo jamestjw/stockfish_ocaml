@@ -122,9 +122,6 @@ module Types = struct
     | W_QUEEN | B_QUEEN -> queen_value
     | W_KING | B_KING -> value_zero
 
-  (* TODO: Implement this when required. *)
-  (* type depth *)
-
   type square =
     | A1
     | B1
