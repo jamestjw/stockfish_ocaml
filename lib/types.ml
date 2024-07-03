@@ -479,7 +479,10 @@ module Types = struct
   type move_type = NORMAL | PROMOTION | EN_PASSANT | CASTLING
   [@@deriving enum, ord, eq, sexp]
 
-  type move = { data : int; value : int } [@@deriving eq, ord, sexp]
+  type move = { data : int; value : int } [@@deriving sexp]
+
+  let equal_move m1 m2 = m1.data = m2.data
+  let compare_move m1 m2 = compare m1.data m2.data
 
   (* A move needs 16 bits to be stored
      bit  0- 5: destination square (from 0 to 63)

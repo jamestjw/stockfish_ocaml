@@ -25,6 +25,9 @@ module MG = MoveGen
 module P = Position
 
 module MovePick = struct
+  (* Depth at which we start considering checks during QS *)
+  let depth_qs_checks = 0
+  let depth_qs_no_checks = -1
   let pawn_history_size = 512 (* has to be a power of 2 *)
   let correction_history_size = 16384 (* has to be a power of 2 *)
   let correction_history_limit = 1024
@@ -254,34 +257,6 @@ module MovePick = struct
 
   type pick_type = NEXT | BEST
 
-  (*
-   * MovePicker is used to pick one pseudo-legal move at a time from the
-   * current position. The most important function is `next_move`, which returns a
-   * new pseudo-legal move each time it is called, until there are no moves left,
-   * when `none_move` is returned. In order to improve the efficiency of the
-   * alpha-beta algorithm, MovePicker attempts to return the moves which are most
-   * likely to get a cut-off first.
-   *)
-
-  type t = {
-    pos : P.t;
-    main_history : ButterflyHistory.t;
-    capture_history : CapturePieceToHistory.t;
-    continuation_history : PieceToHistory.t array;
-    pawn_history : PawnHistory.t;
-    tt_move : Types.move;
-    refutations : Types.move list;
-    cur : Types.move list;
-    end_moves : Types.move list;
-    end_bad_captures : Types.move list;
-    begin_bad_quiets : Types.move list;
-    end_bad_quiets : Types.move list;
-    stage : int;
-    threshold : int;
-    depth : int;
-    moves : Types.move list;
-  }
-
   type stage =
     (* Generate main search moves *)
     | MAIN_TT
@@ -306,6 +281,37 @@ module MovePick = struct
     | QCAPTURE
     | QCHECK_INIT
     | QCHECK
+  [@@deriving enum]
+
+  let next_stage_exn stage =
+    stage_to_enum stage |> stage_of_enum |> Stdlib.Option.get
+
+  (*
+   * MovePicker is used to pick one pseudo-legal move at a time from the
+   * current position. The most important function is `next_move`, which returns a
+   * new pseudo-legal move each time it is called, until there are no moves left,
+   * when `none_move` is returned. In order to improve the efficiency of the
+   * alpha-beta algorithm, MovePicker attempts to return the moves which are most
+   * likely to get a cut-off first.
+   *)
+
+  type t = {
+    pos : P.t;
+    main_history : ButterflyHistory.t;
+    capture_history : CapturePieceToHistory.t;
+    continuation_history : PieceToHistory.t array;
+    pawn_history : PawnHistory.t;
+    tt_move : Types.move;
+    refutations : Types.move * Types.move * Types.move;
+    cur : Types.move list; (* The moves that we consider now *)
+    end_moves : Types.move list;
+    bad_quiets : Types.move list;
+    bad_captures : Types.move list;
+    stage : stage;
+    threshold : int; (* TODO: What is this precisely? *)
+    depth : int;
+    moves : Types.move list; (* All moves we generated *)
+  }
 
   (* Sort moves in descending order up to and including a given limit. The order
      of moves smaller than the limit is left unspecified. *)
@@ -329,16 +335,15 @@ module MovePick = struct
 
   (* let mk_movepicker pos = { pos ; capture_history; _ } *)
 
-  let score gt
-      ({
-         pos;
-         moves;
-         capture_history;
-         main_history;
-         pawn_history;
-         continuation_history;
-         _;
-       } as mp) =
+  let score
+      {
+        pos;
+        capture_history;
+        main_history;
+        pawn_history;
+        continuation_history;
+        _;
+      } gt moves =
     (match gt with
     | MG.CAPTURES | MG.QUIETS | MG.EVASIONS -> ()
     | _ -> failwith "invalid type");
@@ -463,7 +468,200 @@ module MovePick = struct
       in
       { m with value }
     in
-    { mp with moves = List.map ~f:update_move_value moves }
+    List.map ~f:update_move_value moves
+
+  let select ({ tt_move; _ } as mp) pick_type pred =
+    let rec select_best ({ cur; end_moves; _ } as mp) =
+      match (cur, end_moves) with
+      | [], _ -> (mp, Types.none_move)
+      (* If an end move is better than the curr move, swap their positions *)
+      | m :: ms, em :: ems when Types.move_value em > Types.move_value m ->
+          select_best { mp with cur = em :: ms; end_moves = m :: ems }
+      | m :: ms, _ when not @@ Types.equal_move tt_move m ->
+          let res, mp = pred m mp in
+          if res then ({ mp with cur = ms }, m)
+          else select_best { mp with cur = ms }
+      | _ :: ms, _ -> select_best { mp with cur = ms }
+    in
+
+    let rec select_next ({ cur; _ } as mp) =
+      match cur with
+      | [] -> (mp, Types.none_move)
+      | m :: rest when not @@ Types.equal_move tt_move m ->
+          let res, mp = pred m mp in
+          if res then ({ mp with cur = rest }, m)
+          else select_next { mp with cur = rest }
+      | _ :: rest -> select_next { mp with cur = rest }
+    in
+    match pick_type with BEST -> select_best mp | NEXT -> select_next mp
+
+  (*
+   * Most important method of the MovePicker class. It
+   * returns a new pseudo-legal move every time it is called until there are no more
+   * moves left, picking the move with the highest score from a list of generated moves.
+   *)
+  let rec next_move
+      ({
+         stage;
+         tt_move;
+         pos;
+         moves;
+         depth;
+         threshold;
+         bad_quiets;
+         bad_captures;
+         refutations;
+         _;
+       } as mp) skip_quiets =
+    let quiet_threshold d = -3330 * d in
+    match stage with
+    | MAIN_TT | EVASION_TT | QSEARCH_TT | PROBCUT_TT ->
+        ({ mp with stage = next_stage_exn stage }, tt_move)
+    | CAPTURE_INIT | PROBCUT_INIT | QCAPTURE_INIT ->
+        let moves' = MG.generate MG.CAPTURES pos in
+        let moves' = score mp MG.CAPTURES moves' in
+        let moves' = partial_insertion_sort moves' Int.min_value in
+
+        next_move
+          {
+            mp with
+            stage = next_stage_exn stage;
+            cur = moves';
+            moves = moves' @ moves;
+          }
+          skip_quiets
+    | GOOD_CAPTURE ->
+        let mp, move =
+          (* Store losing captures to bad_captures so we may try them again
+             later*)
+          select mp NEXT (fun m mp ->
+              if P.see_ge pos m (-Types.move_value m / 18) then (true, mp)
+              else (false, { mp with bad_captures = m :: mp.bad_captures }))
+        in
+
+        if Types.move_is_ok move then (mp, move)
+        else
+          (* Set `cur` to the refutations *)
+          let cur =
+            (* If the countermove is the same as a killer, skip it *)
+            match refutations with
+            | r0, r1, r2 when Types.equal_move r0 r2 || Types.equal_move r1 r2
+              ->
+                [ r0; r1 ]
+            | r0, r1, r2 -> [ r0; r1; r2 ]
+          in
+
+          next_move { mp with stage = next_stage_exn stage; cur } skip_quiets
+    | REFUTATION ->
+        let mp, move =
+          select mp NEXT (fun m mp ->
+              ( Types.move_is_ok m
+                && (not (P.is_capture_stage pos m))
+                && P.pseudo_legal pos m,
+                mp ))
+        in
+        if Types.move_is_ok move then (mp, move)
+        else next_move { mp with stage = next_stage_exn stage } skip_quiets
+    | QUIET_INIT ->
+        let quiets =
+          if not skip_quiets then
+            let quiets = MG.generate MG.QUIETS pos in
+            let quiets = score mp MG.QUIETS quiets in
+            let quiets =
+              partial_insertion_sort quiets @@ quiet_threshold depth
+            in
+            quiets
+          else []
+        in
+        next_move
+          {
+            mp with
+            stage = next_stage_exn stage;
+            cur = quiets;
+            moves = quiets @ moves;
+          }
+          skip_quiets
+    | GOOD_QUIET ->
+        if not skip_quiets then
+          let mp, move =
+            select mp NEXT (fun m mp ->
+                let r0, r1, r2 = refutations in
+                ( not
+                    (Types.equal_move r0 m || Types.equal_move r1 m
+                   || Types.equal_move r2 m),
+                  mp ))
+          in
+
+          if Types.move_is_ok move then
+            if
+              Types.move_value move > -8000
+              || Types.move_value move <= quiet_threshold depth
+            then (mp, move)
+            else
+              (* Remaining quiets are bad *)
+              next_move
+                {
+                  mp with
+                  stage = next_stage_exn stage;
+                  cur = bad_captures;
+                  bad_quiets = mp.cur;
+                }
+                skip_quiets
+          else
+            next_move
+              { mp with stage = next_stage_exn stage; cur = bad_captures }
+              skip_quiets
+        else
+          next_move
+            { mp with stage = next_stage_exn stage; cur = bad_captures }
+            skip_quiets
+    | BAD_CAPTURE ->
+        let mp, move = select mp NEXT (fun _ mp -> (true, mp)) in
+        if Types.move_is_ok move then (mp, move)
+        else
+          next_move
+            { mp with stage = next_stage_exn stage; cur = bad_quiets }
+            skip_quiets
+    | BAD_QUIET ->
+        if not skip_quiets then
+          select mp NEXT (fun m mp ->
+              let r0, r1, r2 = refutations in
+              ( not
+                  (Types.equal_move r0 m || Types.equal_move r1 m
+                 || Types.equal_move r2 m),
+                mp ))
+        else (mp, Types.none_move)
+    | EVASION_INIT ->
+        let moves' = MG.generate MG.EVASIONS pos in
+        let moves' = score mp MG.EVASIONS moves' in
+
+        next_move
+          {
+            mp with
+            stage = next_stage_exn stage;
+            cur = moves';
+            moves = moves' @ moves;
+          }
+          skip_quiets
+    | EVASION -> select mp BEST (fun _ mp -> (true, mp))
+    | PROBCUT -> select mp NEXT (fun m mp -> (P.see_ge pos m threshold, mp))
+    | QCAPTURE ->
+        let mp, move = select mp NEXT (fun _ mp -> (true, mp)) in
+        if Types.move_is_ok move then (mp, move)
+          (* If we are not at the right depth for QS checks *)
+        else if depth <> depth_qs_checks then (mp, Types.none_move)
+        else next_move { mp with stage = next_stage_exn stage } skip_quiets
+    | QCHECK_INIT ->
+        let moves' = MG.generate MG.QUIET_CHECKS pos in
+        next_move
+          {
+            mp with
+            stage = next_stage_exn stage;
+            cur = moves';
+            moves = moves' @ moves;
+          }
+          skip_quiets
+    | QCHECK -> select mp NEXT (fun _ mp -> (true, mp))
 
   (*
    * Unit tests of helper functions within the module
@@ -497,5 +695,11 @@ module MovePick = struct
       ]
     in
 
-    [%test_result: Types.move list] ~expect:exp (partial_insertion_sort inp 0)
+    (* The default `equal_move` function ignores the value, so we write a
+       special equal function that only looks at the values *)
+    [%test_result: Types.move list]
+      ~equal:
+        (List.equal (fun m1 m2 -> Types.move_value m1 = Types.move_value m2))
+      ~expect:exp
+      (partial_insertion_sort inp 0)
 end
