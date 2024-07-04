@@ -1,5 +1,4 @@
 open Base
-open Position
 open Search
 open Types
 open Unsigned
@@ -68,8 +67,7 @@ let store ({ data; size; generation = tt_generation; _ } as tt) ~key ~m ~depth
   let cluster = Array.get data @@ cluster_idx tt key in
   let rec find_set_idx i (m, best) =
     if i < size then
-      let ({ key; move = tt_move; generation = generation'; bound; depth; _ } as
-           e) =
+      let { key; move = tt_move; generation = generation'; bound; depth; _ } =
         Array.get cluster i
       in
       (* Entry is either empty, or we found an old entry that we should

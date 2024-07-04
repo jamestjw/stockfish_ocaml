@@ -247,7 +247,7 @@ module MovePick = struct
   module CorrectionHistory =
     Stats.Make
       (struct
-        type t = Types.square * int (* int = correction_history_size *)
+        type t = Types.colour * int (* int = correction_history_size *)
 
         let compare = Poly.compare
       end)

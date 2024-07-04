@@ -13,6 +13,9 @@
    ppx_assert)))
 
 (env
+ ; (dev
+ ; (flags
+ ; (:standard -warn-error -A)))
  (release
   (ocamlopt_flags
    (:standard -O3 -unsafe -noassert -inline 100))))
