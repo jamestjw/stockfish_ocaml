@@ -1,3 +1,5 @@
+open Base
+
 let matrix_get matrix i j = Array.get (Array.get matrix i) j
 let matrix_set matrix i j value = Array.set (Array.get matrix i) j value
 
@@ -12,3 +14,5 @@ let matrix_set matrix i j value = Array.set (Array.get matrix i) j value
 let ( -- ) i j =
   let rec aux n acc = if n < i then acc else aux (n - 1) (n :: acc) in
   aux j []
+
+let list_last_exn l = List.rev l |> List.hd_exn

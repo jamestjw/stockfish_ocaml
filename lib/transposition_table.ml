@@ -1,5 +1,4 @@
 open Base
-open Search
 open Types
 open Unsigned
 
@@ -11,9 +10,17 @@ let num_entries = 1572864
 type bound = BOUND_NONE | BOUND_UPPER | BOUND_LOWER | BOUND_EXACT
 [@@deriving eq]
 
+(* Does b1 contain b2? i.e. bool(b1 & b2) *)
+let bound_contains b1 b2 =
+  match (b1, b2) with
+  | BOUND_NONE, BOUND_NONE -> true
+  | _, BOUND_NONE | BOUND_NONE, _ -> false
+  | BOUND_EXACT, _ | _, BOUND_EXACT -> true
+  | _ -> equal_bound b1 b2
+
 type entry = {
   key : UInt32.t;
-  depth : Search.depth;
+  depth : int;
   is_pv : bool;
   bound : bound;
   move : Types.move;
@@ -61,6 +68,7 @@ let probe ({ data; _ } as tt) key =
   Array.find (Array.get data idx) ~f:(fun entry ->
       UInt32.equal entry_key entry.key)
 
+(* Stores data to the TT and returns the entry that was saved *)
 let store ({ data; size; generation = tt_generation; _ } as tt) ~key ~m ~depth
     ~is_pv ~bound ~value ~eval_value =
   let entry_key = UInt64.to_uint32 key in
@@ -98,7 +106,7 @@ let store ({ data; size; generation = tt_generation; _ } as tt) ~key ~m ~depth
     else (m, best)
   in
   let m, set_idx = find_set_idx 0 (m, 0) in
-  Array.set cluster set_idx
+  let tte =
     {
       key = entry_key;
       generation = tt_generation;
@@ -109,6 +117,10 @@ let store ({ data; size; generation = tt_generation; _ } as tt) ~key ~m ~depth
       value;
       eval_value;
     }
+  in
+
+  Array.set cluster set_idx tte;
+  tte
 
 (*
  * `new_search` is called at the beginning of every new search.

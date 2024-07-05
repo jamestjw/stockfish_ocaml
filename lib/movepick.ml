@@ -38,7 +38,7 @@ module MovePick = struct
 
   type pawn_history_type = NORMAL | CORRECTION
 
-  let pawn_structure_index pht pos =
+  let pawn_structure_index ?(pht = NORMAL) pos =
     let i =
       match pht with
       | NORMAL -> pawn_history_size
@@ -105,6 +105,8 @@ module MovePick = struct
 
       val make : unit -> t
       val find : t -> k -> v
+      val add : t -> k -> int -> t
+      val enter : t -> k -> v -> t
     end
 
     module Make (K : StatsKey) (E : StatsEntry.S) :
@@ -118,7 +120,10 @@ module MovePick = struct
 
       let find m k =
         match Map.find_opt k m with Some v -> v | None -> E.default
+
       (* TODO: Decide if I want to make this data structure mutable or not *)
+      let add m k v = Map.add k (E.add (find m k) v) m
+      let enter m k v = Map.add k v m
     end
   end
 
@@ -213,7 +218,7 @@ module MovePick = struct
   module ContinuationHistory =
     Stats.Make
       (struct
-        type t = Types.piece * Types.square
+        type t = Types.piece option * Types.square
 
         let compare = Poly.compare
       end)
@@ -312,6 +317,78 @@ module MovePick = struct
     depth : int;
     moves : Types.move list; (* All moves we generated *)
   }
+
+  (*
+   * Constructors of `movepicker`. As arguments, we pass information
+   * to help it return the (presumably) good moves first, to decide which
+   * moves to return (in the quiescence search, for instance, we only want to
+   * search captures, promotions, and some checks) and how important a good
+   * move ordering is at the current node.
+   *)
+
+  (* constructor for the main search *)
+
+  let mk ~pos ~tt_move ~depth ~mh ~cph ~ch ~ph ~counter_move ~killers =
+    assert (depth > 0);
+    let in_check = P.checkers pos |> BB.bb_not_zero in
+    let exists_tt_move =
+      Types.move_not_none tt_move && P.pseudo_legal pos tt_move
+    in
+    let stage =
+      match (in_check, exists_tt_move) with
+      | true, true -> EVASION_TT
+      | true, false -> EVASION_INIT
+      | false, true -> MAIN_TT
+      | false, false -> CAPTURE_INIT
+    in
+    let k1, k2 = killers in
+    {
+      pos;
+      main_history = mh;
+      capture_history = cph;
+      continuation_history = ch;
+      pawn_history = ph;
+      tt_move;
+      refutations = (k1, k2, counter_move);
+      cur = [];
+      end_moves = [];
+      bad_quiets = [];
+      bad_captures = [];
+      stage;
+      depth;
+      moves = [];
+      threshold = 0;
+    }
+
+  let mk_for_probcut ~pos ~tt_move ~threshold ~cph =
+    let stage =
+      if
+        Types.move_not_none tt_move
+        && P.is_capture_stage pos tt_move
+        && P.pseudo_legal pos tt_move
+        && P.see_ge pos tt_move threshold
+      then PROBCUT_INIT
+      else PROBCUT_TT
+    in
+    assert (BB.bb_is_empty @@ P.checkers pos);
+    {
+      pos;
+      capture_history = cph;
+      tt_move;
+      threshold;
+      stage;
+      (* Dummy values *)
+      main_history = ButterflyHistory.make ();
+      continuation_history = Array.create ~len:0 @@ PieceToHistory.make ();
+      pawn_history = PawnHistory.make ();
+      refutations = (Types.none_move, Types.none_move, Types.none_move);
+      cur = [];
+      end_moves = [];
+      bad_quiets = [];
+      bad_captures = [];
+      depth = Types.depth_none;
+      moves = [];
+    }
 
   (* Sort moves in descending order up to and including a given limit. The order
      of moves smaller than the limit is left unspecified. *)
@@ -433,7 +510,7 @@ module MovePick = struct
             (2 * ButterflyHistory.find main_history (us, src, dst))
             + 2
               * PawnHistory.find pawn_history
-                  (pawn_structure_index NORMAL pos, piece, dst)
+                  (pawn_structure_index pos, piece, dst)
             + PieceToHistory.find (Array.get continuation_history 0) (piece, dst)
             + PieceToHistory.find (Array.get continuation_history 1) (piece, dst)
             + PieceToHistory.find (Array.get continuation_history 2) (piece, dst)
@@ -463,7 +540,7 @@ module MovePick = struct
                   (Array.get continuation_history 0)
                   (piece, dst)
               + PawnHistory.find pawn_history
-                  (pawn_structure_index NORMAL pos, piece, dst)
+                  (pawn_structure_index pos, piece, dst)
         | _ -> failwith "impossible"
       in
       { m with value }
@@ -471,13 +548,14 @@ module MovePick = struct
     List.map ~f:update_move_value moves
 
   let select ({ tt_move; _ } as mp) pick_type pred =
+    let equal_to_tt move = Types.equal_move move tt_move in
     let rec select_best ({ cur; end_moves; _ } as mp) =
       match (cur, end_moves) with
       | [], _ -> (mp, Types.none_move)
       (* If an end move is better than the curr move, swap their positions *)
       | m :: ms, em :: ems when Types.move_value em > Types.move_value m ->
           select_best { mp with cur = em :: ms; end_moves = m :: ems }
-      | m :: ms, _ when not @@ Types.equal_move tt_move m ->
+      | m :: ms, _ when not @@ equal_to_tt m ->
           let res, mp = pred m mp in
           if res then ({ mp with cur = ms }, m)
           else select_best { mp with cur = ms }
@@ -487,7 +565,7 @@ module MovePick = struct
     let rec select_next ({ cur; _ } as mp) =
       match cur with
       | [] -> (mp, Types.none_move)
-      | m :: rest when not @@ Types.equal_move tt_move m ->
+      | m :: rest when not @@ equal_to_tt m ->
           let res, mp = pred m mp in
           if res then ({ mp with cur = rest }, m)
           else select_next { mp with cur = rest }
@@ -500,7 +578,7 @@ module MovePick = struct
    * returns a new pseudo-legal move every time it is called until there are no more
    * moves left, picking the move with the highest score from a list of generated moves.
    *)
-  let rec next_move
+  let rec next_move ?(skip_quiets = false)
       ({
          stage;
          tt_move;
@@ -512,7 +590,7 @@ module MovePick = struct
          bad_captures;
          refutations;
          _;
-       } as mp) skip_quiets =
+       } as mp) =
     let quiet_threshold d = -3330 * d in
     match stage with
     | MAIN_TT | EVASION_TT | QSEARCH_TT | PROBCUT_TT ->
@@ -529,7 +607,7 @@ module MovePick = struct
             cur = moves';
             moves = moves' @ moves;
           }
-          skip_quiets
+          ~skip_quiets
     | GOOD_CAPTURE ->
         let mp, move =
           (* Store losing captures to bad_captures so we may try them again
@@ -551,7 +629,7 @@ module MovePick = struct
             | r0, r1, r2 -> [ r0; r1; r2 ]
           in
 
-          next_move { mp with stage = next_stage_exn stage; cur } skip_quiets
+          next_move { mp with stage = next_stage_exn stage; cur } ~skip_quiets
     | REFUTATION ->
         let mp, move =
           select mp NEXT (fun m mp ->
@@ -561,7 +639,7 @@ module MovePick = struct
                 mp ))
         in
         if Types.move_is_ok move then (mp, move)
-        else next_move { mp with stage = next_stage_exn stage } skip_quiets
+        else next_move { mp with stage = next_stage_exn stage } ~skip_quiets
     | QUIET_INIT ->
         let quiets =
           if not skip_quiets then
@@ -580,7 +658,7 @@ module MovePick = struct
             cur = quiets;
             moves = quiets @ moves;
           }
-          skip_quiets
+          ~skip_quiets
     | GOOD_QUIET ->
         if not skip_quiets then
           let mp, move =
@@ -606,22 +684,22 @@ module MovePick = struct
                   cur = bad_captures;
                   bad_quiets = mp.cur;
                 }
-                skip_quiets
+                ~skip_quiets
           else
             next_move
               { mp with stage = next_stage_exn stage; cur = bad_captures }
-              skip_quiets
+              ~skip_quiets
         else
           next_move
             { mp with stage = next_stage_exn stage; cur = bad_captures }
-            skip_quiets
+            ~skip_quiets
     | BAD_CAPTURE ->
         let mp, move = select mp NEXT (fun _ mp -> (true, mp)) in
         if Types.move_is_ok move then (mp, move)
         else
           next_move
             { mp with stage = next_stage_exn stage; cur = bad_quiets }
-            skip_quiets
+            ~skip_quiets
     | BAD_QUIET ->
         if not skip_quiets then
           select mp NEXT (fun m mp ->
@@ -642,7 +720,7 @@ module MovePick = struct
             cur = moves';
             moves = moves' @ moves;
           }
-          skip_quiets
+          ~skip_quiets
     | EVASION -> select mp BEST (fun _ mp -> (true, mp))
     | PROBCUT -> select mp NEXT (fun m mp -> (P.see_ge pos m threshold, mp))
     | QCAPTURE ->
@@ -650,7 +728,7 @@ module MovePick = struct
         if Types.move_is_ok move then (mp, move)
           (* If we are not at the right depth for QS checks *)
         else if depth <> depth_qs_checks then (mp, Types.none_move)
-        else next_move { mp with stage = next_stage_exn stage } skip_quiets
+        else next_move { mp with stage = next_stage_exn stage } ~skip_quiets
     | QCHECK_INIT ->
         let moves' = MG.generate MG.QUIET_CHECKS pos in
         next_move
@@ -660,7 +738,7 @@ module MovePick = struct
             cur = moves';
             moves = moves' @ moves;
           }
-          skip_quiets
+          ~skip_quiets
     | QCHECK -> select mp NEXT (fun _ mp -> (true, mp))
 
   (*

@@ -83,6 +83,10 @@ module Position = struct
   let side_to_move { side_to_move; _ } = side_to_move
   let piece_on { board; _ } sq = Array.get board (Types.square_to_enum sq)
   let piece_on_exn pos sq = piece_on pos sq |> Stdlib.Option.get
+
+  let piece_type_on_exn pos sq =
+    piece_on pos sq |> Stdlib.Option.get |> Types.type_of_piece
+
   let is_empty pos sq = piece_on pos sq |> Option.is_none
   let moved_piece pos m = piece_on pos @@ Types.move_src m
   let moved_piece_exn pos m = moved_piece pos m |> Stdlib.Option.get

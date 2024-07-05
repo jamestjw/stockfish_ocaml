@@ -35,7 +35,7 @@ module MoveGen = struct
     | LEGAL (* Generates all the legal moves in the given position *)
   [@@deriving eq]
 
-  type move_list = Types.move list
+  (* type move_list = Types.move list *)
 
   (* `enemy` means that we are capturing a piece while promoting *)
   (* gt:

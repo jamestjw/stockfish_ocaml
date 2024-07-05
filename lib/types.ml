@@ -472,6 +472,8 @@ module Types = struct
      for BLACK is seen as being of the 2nd rank. *)
   let relative_rank_of_sq colour sq = relative_rank colour @@ rank_of_sq sq
   let pawn_push_direction = function WHITE -> NORTH | BLACK -> SOUTH
+  let mate_in ply = value_mate - ply
+  let mated_in ply = -value_mate + ply
 
   type move_type = NORMAL | PROMOTION | EN_PASSANT | CASTLING
   [@@deriving enum, ord, eq, sexp]
@@ -519,9 +521,10 @@ module Types = struct
   let move_value { value; _ } = value
   let none_move = { data = 0; value = 0 }
   let null_move = { data = 0b1000001; value = 0 } (* Same src and dest *)
-
-  let move_is_ok move =
-    (not (equal_move move none_move)) && not (equal_move move null_move)
+  let move_not_none move = not (equal_move move none_move)
+  let move_is_none move = equal_move move none_move
+  let move_not_null move = not (equal_move move null_move)
+  let move_is_ok move = move_not_none move && move_not_null move
 
   let move_src { data; _ } =
     Int.shift_right_logical data 6
@@ -540,6 +543,11 @@ module Types = struct
     | 2 -> Some ROOK
     | 3 -> Some QUEEN
     | _ -> None
+
+  let depth_qs_checks = 0
+  let depth_qs_no_checks = -1
+  let depth_none = -6
+  let depth_offset = -7 (* value used only for TT entry occupancy check *)
 end
 
 let%test_unit "test_sq_plus_dir" =
