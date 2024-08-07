@@ -3,6 +3,7 @@ open Movepick
 open Position
 open Types
 module MP = MovePick
+module MG = Movegen.MoveGen
 module P = Position
 module TT = Transposition_table
 
@@ -391,8 +392,413 @@ module Search = struct
    * Quiescence search function, which is called by the main search
    * function with zero depth, or recursively with further decreasing depth per call.
    *)
-  let qsearch _worker _node_type _pos _stack _ss _alpha _beta _depth =
-    failwith "TODO"
+  let rec qsearch worker node_type pos stack ss alpha beta depth =
+    assert (not @@ equal_node_type node_type ROOT);
+    let is_pv = equal_node_type node_type PV in
+    assert (
+      alpha >= -Types.value_infinite
+      && alpha < beta
+      && beta <= Types.value_infinite);
+    assert (is_pv || alpha = beta - 1);
+    assert (depth <= 0);
+    let us = P.side_to_move pos in
+
+    let rec step1 worker stack ss alpha beta =
+      (* Step 1. Initialize node *)
+      let curr_se = Array.get stack ss in
+      let curr_se =
+        { curr_se with in_check = BB.bb_not_zero @@ P.checkers pos }
+      in
+      let next_se = Array.get stack @@ (ss + 1) in
+
+      let curr_se =
+        if is_pv then (
+          let next_se = { next_se with pv = [] } in
+          let curr_se = { curr_se with pv = [ Types.none_move ] } in
+          Array.set stack ss curr_se;
+          Array.set stack (ss + 1) next_se;
+          curr_se)
+        else curr_se
+      in
+
+      (* Used to send selDepth info to GUI (selDepth counts from 1, ply from 0) *)
+      let worker =
+        if is_pv && worker.sel_depth < curr_se.ply + 1 then
+          { worker with sel_depth = curr_se.ply + 1 }
+        else worker
+      in
+
+      step2 worker stack ss alpha beta
+    and step2 worker stack ss alpha beta =
+      (* Step 2. Check for an immediate draw or maximum ply reached *)
+      let curr_se = Array.get stack ss in
+      if P.is_draw pos curr_se.ply || curr_se.ply >= Types.max_ply then
+        if curr_se.ply >= Types.max_ply && not curr_se.in_check then
+          (worker, Evaluation.evaluate pos @@ optimism worker us)
+        else (worker, Types.value_draw)
+      else (
+        assert (0 <= curr_se.ply && curr_se.ply < Types.max_ply);
+        (* Decide the replacement and cutoff priority of the qsearch TT entries *)
+        let tt_depth_prio =
+          if curr_se.in_check || depth >= Types.depth_qs_checks then
+            Types.depth_qs_checks
+          else Types.depth_qs_no_checks
+        in
+        step3 worker stack ss alpha beta tt_depth_prio)
+    and step3 worker stack ss alpha beta tt_depth_prio =
+      (* Step 3. Transposition table lookup *)
+      let curr_se = Array.get stack ss in
+      let pos_key = P.key pos in
+      let tte = TT.probe worker.tt pos_key in
+      (* TODO: save curr_ se *)
+      let curr_se = { curr_se with tt_hit = Option.is_some tte } in
+      let tt_value, tt_move, pv_hit, tt_depth, tt_bound =
+        match tte with
+        | Some tte ->
+            ( value_from_tt tte.value curr_se.ply (P.rule50_count pos),
+              tte.move,
+              tte.is_pv,
+              tte.depth,
+              tte.bound )
+        | None ->
+            ( Types.value_none,
+              Types.none_move,
+              false,
+              Types.depth_none,
+              TT.BOUND_NONE )
+      in
+      (* At non-PV nodes we check for an early TT cutoff *)
+      if
+        (not is_pv) && tt_depth >= tt_depth_prio
+        && tt_value <> Types.value_none
+           (* Only in case of TT access race or if !tt_hit *)
+        && TT.bound_contains tt_bound
+             (if tt_value >= beta then TT.BOUND_LOWER else TT.BOUND_UPPER)
+      then (worker, tt_value)
+      else
+        step4 worker stack ss tte tt_value tt_move ~alpha ~beta ~pv_hit
+          ~tt_depth
+    and step4 worker stack ss (tte : TT.entry option) tt_value tt_move ~alpha
+        ~beta ~pv_hit ~tt_depth =
+      let curr_se = Array.get stack ss in
+      let prev_se = Array.get stack @@ (ss - 1) in
+      let unadjusted_static_eval, best_value, futility_base, alpha, ret_val =
+        if curr_se.in_check then
+          ( Types.value_none,
+            -Types.value_infinite,
+            -Types.value_infinite,
+            alpha,
+            None )
+        else
+          let unadjusted_static_eval, best_value, curr_se =
+            match tte with
+            | Some tte ->
+                (* Never assume anything about values stored in TT *)
+                let unadjusted_static_eval = tte.eval_value in
+                let unadjusted_static_eval =
+                  if unadjusted_static_eval = Types.value_none then
+                    Evaluation.evaluate pos @@ optimism worker us
+                  else unadjusted_static_eval
+                in
+                let best_value =
+                  to_corrected_static_eval unadjusted_static_eval worker pos
+                in
+                let curr_se = { curr_se with static_eval = best_value } in
+
+                (* ttValue can be used as a better position evaluation (~13 Elo) *)
+                let best_value =
+                  if
+                    tt_value <> Types.value_none
+                    && TT.bound_contains tte.bound
+                         (if tt_value > best_value then TT.BOUND_LOWER
+                          else TT.BOUND_UPPER)
+                  then tt_value
+                  else best_value
+                in
+                (unadjusted_static_eval, best_value, curr_se)
+            | None ->
+                (* In case of null move search, use previous static eval with a different sign *)
+                let unadjusted_static_eval =
+                  if Types.move_not_null prev_se.current_move then
+                    Evaluation.evaluate pos @@ optimism worker us
+                  else -prev_se.static_eval
+                in
+
+                let best_value =
+                  to_corrected_static_eval unadjusted_static_eval worker pos
+                in
+                let curr_se = { curr_se with static_eval = best_value } in
+                (unadjusted_static_eval, best_value, curr_se)
+          in
+          Array.set stack ss curr_se;
+          (* Stand pat. Return immediately if static value is at least beta *)
+          if best_value >= beta then (
+            if not curr_se.tt_hit then
+              ignore
+              @@ TT.store worker.tt ~key:(P.key pos)
+                   ~value:(value_to_tt best_value curr_se.ply)
+                   ~is_pv:false ~bound:BOUND_LOWER ~depth:Types.depth_none
+                   ~m:Types.none_move ~eval_value:unadjusted_static_eval;
+            ( unadjusted_static_eval,
+              best_value,
+              Types.value_none,
+              alpha,
+              Some best_value ))
+          else
+            let alpha = if best_value > alpha then best_value else alpha in
+            ( unadjusted_static_eval,
+              best_value,
+              curr_se.static_eval + 206,
+              alpha,
+              None )
+      in
+      match ret_val with
+      | Some ret_val -> (worker, ret_val)
+      | None ->
+          step5 worker pos stack ss tt_move best_value Types.none_move
+            futility_base ~alpha ~beta ~pv_hit ~tt_depth
+            ~static_eval:unadjusted_static_eval
+    (* Step 5. Loop through all pseudo-legal moves until no moves remain
+       or a beta cutoff occurs. *)
+    and step5 worker pos stack ss tt_move best_value best_move futility_base
+        ~alpha ~beta ~pv_hit ~tt_depth ~static_eval =
+      let prev_se = Array.get stack @@ (ss - 1) in
+      let cont_hists =
+        Array.of_list
+          [
+            (Array.get stack @@ (ss - 1)).continuation_history;
+            (Array.get stack @@ (ss - 2)).continuation_history;
+          ]
+      in
+
+      (* Initialize a Move_picker object for the current position, and prepare
+         to search the moves. Because the depth is <= 0 here, only captures,
+         queen promotions, and other checks (only if depth >= DEPTH_QS_CHECKS)
+         will be generated. *)
+      let prev_sq =
+        if Types.move_is_ok prev_se.current_move then
+          Some (Types.move_dst prev_se.current_move)
+        else None
+      in
+
+      let mp =
+        MP.mk_for_qs ~pos ~tt_move ~depth ~mh:worker.main_history
+          ~cph:worker.capture_history ~ch:cont_hists ~ph:worker.pawn_history
+      in
+      let rec loop ~mp ~worker ~move_count ~quiet_check_evasions ~best_value
+          ~best_move ~alpha =
+        let mp, move = MP.next_move mp in
+        if Types.move_not_none move then (
+          assert (Types.move_is_ok move);
+          if not @@ P.legal pos move then
+            loop ~mp ~worker ~move_count ~quiet_check_evasions ~best_value
+              ~best_move ~alpha
+          else
+            let gives_check = P.gives_check pos move in
+            let capture = P.is_capture_stage pos move in
+            let move_count = move_count + 1 in
+            step6 stack ss mp move move_count best_value best_move cont_hists
+              gives_check capture quiet_check_evasions)
+        else
+          (* Out of moves, go to step 9 *)
+          step9 ~worker ~pos ~stack ~ss ~best_value ~beta ~pv_hit ~tt_depth
+            ~static_eval
+      and (* Step 6. Pruning *)
+          step6 stack ss mp move move_count best_value best_move cont_hists
+          gives_check captures quiet_check_evasions =
+        let moved_piece = P.moved_piece pos move in
+        let move_dst = Types.move_dst move in
+        let rec step6_postlude () =
+          (* TODO: Speculative prefetch as early as possible *)
+          let curr_se = Array.get stack ss in
+          let curr_se =
+            {
+              curr_se with
+              current_move = move;
+              continuation_history =
+                get_from_ch worker ~in_check:curr_se.in_check ~captures
+                  ~piece:moved_piece ~sq:move_dst;
+            }
+          in
+          Array.set stack ss curr_se;
+          let quiet_check_evasions =
+            quiet_check_evasions
+            + Bool.to_int ((not captures) && curr_se.in_check)
+          in
+          step7 ~quiet_check_evasions
+        and (* Helper to skip to next move *)
+            go_next_move ~worker ~quiet_check_evasions ~best_value ~best_move
+            ~alpha =
+          loop ~mp ~worker ~move_count ~quiet_check_evasions ~best_value
+            ~best_move ~alpha
+        and step7 ~quiet_check_evasions =
+          (* Step 7. Make and search the move *)
+          let pos = P.do_move pos move gives_check in
+          let worker, value =
+            qsearch_inv worker node_type pos stack (ss + 1) (-beta) (-alpha)
+              (depth - 1)
+          in
+          let pos = P.undo_move pos move in
+
+          assert (value > -Types.value_infinite && value < Types.value_infinite);
+          step8 ~worker ~pos ~value ~quiet_check_evasions
+        and step8 ~worker ~pos ~value ~quiet_check_evasions =
+          (* Step 8. Check for a new best move *)
+          if value > best_value then
+            let best_value = value in
+
+            if value > alpha then (
+              let best_move = move in
+              let curr_se = Array.get stack ss in
+              let pv =
+                if equal_node_type PV node_type then
+                  update_pv curr_se.pv move (Array.get stack (ss + 1)).pv
+                else curr_se.pv
+              in
+              Array.set stack ss { curr_se with pv };
+
+              if value < beta then
+                (* Update alpha here! *)
+                go_next_move ~worker ~quiet_check_evasions ~best_value
+                  ~best_move ~alpha:value
+              else
+                (* Fail high *)
+                step9 ~worker ~pos ~stack ~ss ~best_value ~beta ~pv_hit
+                  ~tt_depth ~static_eval)
+            else
+              go_next_move ~worker ~quiet_check_evasions ~best_value ~best_move
+                ~alpha
+          else
+            go_next_move ~worker ~quiet_check_evasions ~best_value ~best_move
+              ~alpha
+        in
+        (* Step 6 body *)
+        if
+          best_value > Types.value_tb_loss_in_max_ply
+          && P.non_pawn_material_for_colour pos us <> 0
+        then
+          let rec fp_and_mc_pruning () =
+            if move_count > 2 then
+              go_next_move ~worker ~quiet_check_evasions ~best_value ~best_move
+                ~alpha
+            else
+              let futility_value =
+                futility_base + Types.piece_value (P.piece_on_exn pos move_dst)
+              in
+              (* If static eval + value of piece we are going to capture is much lower
+                 than alpha we can prune this move. (~2 Elo) *)
+              if futility_value <= alpha then
+                let best_value = Int.max best_value futility_value in
+                go_next_move ~worker ~quiet_check_evasions ~best_value
+                  ~best_move ~alpha
+              else if
+                (* If static eval is much lower than alpha and move is not winning material
+                   we can prune this move. (~2 Elo) *)
+                futility_base <= alpha && (not @@ P.see_ge pos move 1)
+              then
+                let best_value = Int.max best_value futility_base in
+
+                go_next_move ~worker ~quiet_check_evasions ~best_value
+                  ~best_move ~alpha
+              else if
+                (* If static exchange evaluation is much worse than what is needed to not
+                   fall below alpha we can prune this move. *)
+                futility_base > alpha
+                && (not @@ P.see_ge pos move ((alpha - futility_base) * 4))
+              then
+                go_next_move ~worker ~quiet_check_evasions ~best_value:alpha
+                  ~best_move ~alpha
+              else other_pruning ~quiet_check_evasions
+          and other_pruning ~quiet_check_evasions =
+            (* We prune after the second quiet check evasion move, where being 'in check' is
+               implicitly checked through the counter, and being a 'quiet move' apart from
+               being a tt move is assumed after an increment because captures are pushed ahead. *)
+            if quiet_check_evasions > 1 then
+              step9 ~worker ~pos ~stack ~ss ~best_value ~beta ~pv_hit ~tt_depth
+                ~static_eval
+            else if
+              (* Continuation history based pruning (~3 Elo) *)
+              (not captures)
+              && MP.PieceToHistory.find (Array.get cont_hists 0)
+                   (Stdlib.Option.get moved_piece, move_dst)
+                 < 0
+              && MP.PieceToHistory.find (Array.get cont_hists 1)
+                   (Stdlib.Option.get moved_piece, move_dst)
+                 < 0
+            then
+              go_next_move ~worker ~quiet_check_evasions ~best_value ~best_move
+                ~alpha
+              (* Do not search moves with bad enough SEE values (~5 Elo) *)
+            else if not @@ P.see_ge pos move (-74) then
+              go_next_move ~worker ~quiet_check_evasions ~best_value ~best_move
+                ~alpha
+            else step6_postlude ()
+          in
+
+          (* Futility pruning and moveCount pruning (~10 Elo) *)
+          if
+            (not gives_check)
+            && (not Poly.(Some move_dst = prev_sq))
+            && futility_base > Types.value_tb_loss_in_max_ply
+            && not
+                 (Types.equal_move_type (Types.get_move_type move)
+                    Types.PROMOTION)
+          then fp_and_mc_pruning ()
+          else other_pruning ~quiet_check_evasions
+        else step6_postlude ()
+      and step9 ~worker ~pos ~stack ~ss ~best_value ~beta ~pv_hit ~tt_depth
+          ~static_eval =
+        (* Step 9. Check for mate *)
+        let curr_se = Array.get stack ss in
+
+        if curr_se.in_check && best_value = -Types.value_infinite then (
+          (* All legal moves have been searched. A special case: if we're in check
+             and no legal moves were found, it is checkmate. *)
+          assert (List.is_empty @@ MG.generate MG.LEGAL pos);
+          (* Plies to mate from the root *)
+          (worker, Types.mated_in @@ curr_se.ply))
+        else
+          let best_value =
+            if
+              Int.abs best_value < Types.value_tb_win_in_max_ply
+              && best_value >= beta
+            then ((3 * best_value) + beta) / 4
+            else best_value
+          in
+
+          (* Save gathered info in transposition table
+             Static evaluation is saved as it was before adjustment by correction history *)
+          ignore
+          @@ TT.store worker.tt ~key:(P.key pos) ~m:best_move ~depth:tt_depth
+               ~bound:
+                 (if best_value >= beta then TT.BOUND_LOWER else TT.BOUND_UPPER)
+               ~is_pv:pv_hit
+               ~value:(value_to_tt best_value curr_se.ply)
+               ~eval_value:static_eval;
+
+          assert (
+            best_value > -Types.value_infinite
+            && best_value < Types.value_infinite);
+
+          (worker, best_value)
+      in
+      loop ~mp ~worker ~move_count:0 ~quiet_check_evasions:0 ~best_value
+        ~best_move ~alpha
+    in
+    (* Check if we have an upcoming move that draws by repetition, or if
+       the opponent had an alternative move earlier to this position. (~1 Elo) *)
+    let curr_se = Array.get stack ss in
+    if alpha < Types.value_draw && P.has_game_cycle pos curr_se.ply then
+      let alpha = value_draw worker.nodes in
+      if alpha >= beta then (worker, alpha)
+      else step1 worker stack ss alpha beta
+    else step1 worker stack ss alpha beta
+
+  and qsearch_inv worker node_type pos stack ss alpha beta depth =
+    let worker, value =
+      qsearch worker node_type pos stack ss alpha beta depth
+    in
+    (worker, -value)
 
   let rec search ({ nodes; _ } as worker) node_type pos stack ss alpha beta
       depth is_cut_node : worker * Types.value =
@@ -710,7 +1116,9 @@ module Search = struct
         < alpha - 438
           - ((332 - (154 * Bool.to_int (cut_off_count > 3))) * depth * depth)
       then
-        let value = qsearch worker NON_PV pos stack ss (alpha - 1) alpha 0 in
+        let worker, value =
+          qsearch worker NON_PV pos stack ss (alpha - 1) alpha 0
+        in
         if value < alpha then (worker, value)
         else
           step8 worker stack ss best_value max_value alpha beta is_excluded
@@ -899,9 +1307,9 @@ module Search = struct
               let pos = P.do_move pos move (P.gives_check pos move) in
 
               (* Perform a preliminary qsearch to verify that the move holds *)
-              let value =
-                -qsearch worker NON_PV pos stack (ss + 1) (-prob_cut_beta)
-                   (-prob_cut_beta + 1) 0
+              let worker, value =
+                qsearch_inv worker NON_PV pos stack (ss + 1) (-prob_cut_beta)
+                  (-prob_cut_beta + 1) 0
               in
               (* If the qsearch held, perform the regular search *)
               let worker, value =

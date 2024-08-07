@@ -390,6 +390,39 @@ module MovePick = struct
       moves = [];
     }
 
+  (* Move picker for quiescence search *)
+  let mk_for_qs ~pos ~tt_move ~depth ~mh ~cph ~ch ~ph =
+    assert (depth > 0);
+    let in_check = P.checkers pos |> BB.bb_not_zero in
+    let exists_tt_move =
+      Types.move_not_none tt_move && P.pseudo_legal pos tt_move
+    in
+    let stage =
+      match (in_check, exists_tt_move) with
+      | true, true -> EVASION_TT
+      | true, false -> EVASION_INIT
+      | false, true -> QSEARCH_TT
+      | false, false -> QCAPTURE_INIT
+    in
+    {
+      stage;
+      depth;
+      pos;
+      capture_history = cph;
+      tt_move;
+      main_history = mh;
+      continuation_history = ch;
+      pawn_history = ph;
+      (* Dummy values *)
+      threshold = Types.value_none;
+      refutations = (Types.none_move, Types.none_move, Types.none_move);
+      cur = [];
+      end_moves = [];
+      bad_quiets = [];
+      bad_captures = [];
+      moves = [];
+    }
+
   (* Sort moves in descending order up to and including a given limit. The order
      of moves smaller than the limit is left unspecified. *)
   let partial_insertion_sort lst limit =
