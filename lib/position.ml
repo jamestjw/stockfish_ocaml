@@ -1855,6 +1855,8 @@ module Position = struct
       loop 3 (Stdlib.Option.get previous)
 
   (* TODO: Implement `flip` after we implement `fen` function *)
+  (* TODO: Implement this *)
+  let psq_score pos = Score.mk 0 0
 end
 
 let%test_unit "dummy_test" = ()

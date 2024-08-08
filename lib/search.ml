@@ -841,7 +841,7 @@ module Search = struct
       let { ply; in_check; _ } = Array.get stack ss in
       if P.is_draw pos ply || ply >= Types.max_ply then
         if ply >= Types.max_ply && not in_check then
-          Evaluation.evaluate pos (optimism worker us)
+          (worker, Evaluation.evaluate pos (optimism worker us))
         else (worker, value_draw worker.nodes)
       else step3 worker stack ss best_value max_value
     and step3 worker stack ss best_value max_value =

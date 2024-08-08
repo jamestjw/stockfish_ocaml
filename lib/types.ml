@@ -122,6 +122,14 @@ module Types = struct
     | W_QUEEN | B_QUEEN -> queen_value
     | W_KING | B_KING -> value_zero
 
+  let piece_type_value = function
+    | PAWN -> pawn_value
+    | KNIGHT -> knight_value
+    | BISHOP -> bishop_value
+    | ROOK -> rook_value
+    | QUEEN -> queen_value
+    | KING -> value_zero
+
   type square =
     | A1
     | B1

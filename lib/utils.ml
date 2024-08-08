@@ -16,3 +16,4 @@ let ( -- ) i j =
   aux j []
 
 let list_last_exn l = List.rev l |> List.hd_exn
+let uncurry f (x, y) = f x y
