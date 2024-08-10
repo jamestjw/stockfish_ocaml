@@ -238,8 +238,7 @@ module Search = struct
 
   let update_pv pv move child_pv = child_pv @ (move :: pv)
 
-  let optimism { optimism; _ } colour =
-    let white_optimism, black_optimism = optimism in
+  let optimism { optimism = white_optimism, black_optimism; _ } colour =
     match colour with
     | Types.WHITE -> white_optimism
     | Types.BLACK -> black_optimism

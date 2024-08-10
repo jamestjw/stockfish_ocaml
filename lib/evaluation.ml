@@ -271,7 +271,7 @@ let threatened_by_pawn_penalty =
 let evaluate_pieces_of_color pos ei us piece_type mobility_area =
   let them = Types.other_colour us in
   let piece_bb = P.pieces_of_colour_and_pt pos us piece_type in
-  let their_king_square = P.square_of_pt_and_colour pos Types.KING them in
+  let _their_king_square = P.square_of_pt_and_colour pos Types.KING them in
   let do_sq
       ( attacked_by,
         king_attackers_count,
@@ -395,9 +395,7 @@ let evaluate_pieces_of_color pos ei us =
     BB.bb_not
     @@ BB.bb_or (get_attacked_by ei them Types.PAWN) (P.pieces_of_colour pos us)
   in
-  let ei, score, mobility =
-    evaluate_pieces_of_color pos ei us Types.KNIGHT mobility_area
-  in
+
   List.fold [ Types.KNIGHT; Types.BISHOP; Types.ROOK; Types.QUEEN ]
     ~init:(ei, Score.zero, Score.zero) ~f:(fun (ei, score, mobility) pt ->
       let ei, score', mobility' =
@@ -429,10 +427,10 @@ let evaluate pos _optimism =
     |> init_eval_info pos Types.WHITE
     |> init_eval_info pos Types.BLACK
   in
-  let ei, score', mobility_white =
+  let ei, score', _mobility_white =
     evaluate_pieces_of_color pos ei Types.WHITE
   in
-  let ei, score'', mobility_black =
+  let _ei, score'', _mobility_black =
     evaluate_pieces_of_color pos ei Types.BLACK
   in
   let score = Score.Infix.(score + score' - score'') in

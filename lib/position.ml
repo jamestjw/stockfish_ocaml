@@ -20,7 +20,6 @@ open Base
 open Bitboard
 open Types
 open Unsigned
-open Utils
 module BB = Bitboard
 
 module Position = struct
@@ -72,8 +71,8 @@ module Position = struct
        square is moved or captured, then the value in the array is
        precisely the change in castling rights. *)
     castling_rights_mask : int array;
-    castling_rook_square : Types.square option array;
-    castling_path : BB.t array;
+    castling_rook_square : (Types.castling_right, Types.square) Hashtbl.t;
+    castling_path : (Types.castling_right, BB.t) Hashtbl.t;
     game_ply : int;
     side_to_move : Types.colour;
     chess960 : bool;
@@ -138,7 +137,8 @@ module Position = struct
     match cr with
     | Types.WHITE_OO | Types.WHITE_OOO | Types.BLACK_OO | Types.BLACK_OOO ->
         BB.bb_and (pieces pos)
-          (Array.get castling_path (Types.castling_right_to_enum cr))
+          (Hashtbl.find castling_path cr
+          |> Stdlib.Option.value ~default:BB.empty)
         |> BB.bb_not_zero
 
   (* TODO: Check what we are calling this with and where its used, maybe
@@ -146,7 +146,7 @@ module Position = struct
   let castling_rook_square { castling_rook_square; _ } cr =
     match cr with
     | Types.WHITE_OO | Types.WHITE_OOO | Types.BLACK_OO | Types.BLACK_OOO ->
-        Array.get castling_rook_square (Types.castling_right_to_enum cr)
+        Hashtbl.find castling_rook_square cr
 
   (* Returns all the squares attacked by a certain colour *)
   let attacks_by pos pt colour =
@@ -353,13 +353,13 @@ module Position = struct
     let no_pawns = gen_uint64 () in
     List.iter (List.cartesian_product Types.all_pieces Types.all_squares)
       ~f:(fun (piece, sq) ->
-        matrix_set psq
+        Utils.matrix_set psq
           (Types.piece_to_enum piece)
           (Types.square_to_enum sq) (gen_uint64 ()));
     List.iter Types.all_files ~f:(fun file ->
         Array.set en_passant (Types.file_to_enum file) (gen_uint64 ()));
     List.iter
-      (0 -- (Types.castling_right_num_combinations - 1))
+      Utils.(0 -- (Types.castling_right_num_combinations - 1))
       ~f:(fun i -> Array.set castling i (gen_uint64 ()));
     (* Setup tables with all possible piece movements, we ignore pawn moves as they
        reset the repetition count *)
@@ -383,8 +383,8 @@ module Position = struct
                      let m = Types.mk_move s2 s1 in
                      let key =
                        UInt64.Infix.(
-                         matrix_get psq piece_enum s1_enum
-                         lxor matrix_get psq piece_enum s2_enum
+                         Utils.matrix_get psq piece_enum s1_enum
+                         lxor Utils.matrix_get psq piece_enum s2_enum
                          lxor side)
                      in
                      let i = h1 key in
@@ -396,12 +396,12 @@ module Position = struct
     { psq; en_passant; castling; side; no_pawns }
 
   let get_zobrist_psq piece sq =
-    matrix_get zobrist_data.psq
+    Utils.matrix_get zobrist_data.psq
       (Types.piece_to_enum piece)
       (Types.square_to_enum sq)
 
   let get_zobrist_psq_with_count piece count =
-    matrix_get zobrist_data.psq (Types.piece_to_enum piece) count
+    Utils.matrix_get zobrist_data.psq (Types.piece_to_enum piece) count
 
   let get_zobrist_ep sq =
     Array.get zobrist_data.en_passant (Types.file_of_sq sq |> Types.file_to_enum)
@@ -429,7 +429,8 @@ module Position = struct
       (Array.get castling_rights_mask king_sq_enum lor cr_enum);
     Array.set castling_rights_mask rook_sq_enum
       (Array.get castling_rights_mask rook_sq_enum lor cr_enum);
-    Array.set castling_rook_square cr_enum (Some rook_sq);
+
+    ignore @@ Hashtbl.add castling_rook_square ~key:cr ~data:rook_sq;
     let king_dest_sq =
       Types.relative_sq colour
       @@ if Types.is_kingside_castling cr then Types.G1 else Types.C1
@@ -448,7 +449,7 @@ module Position = struct
         || BB.between_bb king_sq king_dest_sq)
         & BB.bb_not (BB.square_bb king_sq || BB.square_bb rook_sq))
     in
-    Array.set castling_path cr_enum path;
+    ignore @@ Hashtbl.add castling_path ~key:cr ~data:path;
     { pos with st }
 
   (*
@@ -566,13 +567,14 @@ module Position = struct
         let piece = piece_on_exn pos sq in
         let piece_enum = Types.piece_to_enum piece in
         let key =
-          UInt64.logxor key @@ matrix_get zobrist_data.psq piece_enum sq_enum
+          UInt64.logxor key
+          @@ Utils.matrix_get zobrist_data.psq piece_enum sq_enum
         in
         let pawn_key, white_npm, black_npm =
           match Types.type_of_piece piece with
           | Types.PAWN ->
               ( UInt64.logxor pawn_key
-                @@ matrix_get zobrist_data.psq piece_enum sq_enum,
+                @@ Utils.matrix_get zobrist_data.psq piece_enum sq_enum,
                 white_npm,
                 black_npm )
           (* King doesn't affect pawn key or npm *)
@@ -625,8 +627,9 @@ module Position = struct
           let piece_enum = Types.piece_to_enum pc in
           List.fold ~init:mk
             ~f:(fun mk cnt ->
-              UInt64.logxor mk @@ matrix_get zobrist_data.psq piece_enum cnt)
-            (0 -- (Array.get piece_count piece_enum - 1)))
+              UInt64.logxor mk
+              @@ Utils.matrix_get zobrist_data.psq piece_enum cnt)
+            Utils.(0 -- (Array.get piece_count piece_enum - 1)))
         Types.all_pieces
     in
 
@@ -914,14 +917,7 @@ module Position = struct
      and raise an assert if something wrong is detected.
      This is meant to be helpful when debugging. *)
   let pos_is_ok
-      ({
-         side_to_move;
-         piece_count;
-         board;
-         castling_rook_square;
-         castling_rights_mask;
-         _;
-       } as pos) =
+      ({ side_to_move; piece_count; board; castling_rights_mask; _ } as pos) =
     let fast = true in
     let them = Types.other_colour side_to_move in
 
@@ -1016,9 +1012,7 @@ module Position = struct
         ~f:(fun (colour, cr) ->
           if can_castle pos cr then (
             let cr_enum = Types.castling_right_to_enum cr in
-            let crsq =
-              Array.get castling_rook_square cr_enum |> Stdlib.Option.get
-            in
+            let crsq = castling_rook_square pos cr |> Stdlib.Option.get in
             (* Check that castling rook square is right *)
             assert (
               Types.equal_piece
@@ -1066,6 +1060,26 @@ module Position = struct
       (Types.mk_piece us Types.ROOK)
       (if is_do then rook_dst else rook_src);
     (king_dst, rook_src, rook_dst)
+
+  let new_st () =
+    {
+      material_key = UInt64.zero;
+      pawn_key = UInt64.zero;
+      castling_rights = 0;
+      rule50 = 0;
+      plies_from_null = 0;
+      ep_square = None;
+      previous = None;
+      non_pawn_material = Array.create ~len:2 0;
+      key = UInt64.zero;
+      checkers_bb = BB.empty;
+      blockers_for_king = Array.create ~len:2 BB.empty;
+      pinners = Array.create ~len:2 BB.empty;
+      check_squares =
+        Array.create ~len:(List.length Types.all_piece_types) BB.empty;
+      captured_piece = None;
+      repetition = 0;
+    }
 
   let new_st_from_prev
       ({ (* This needs to be duplicated *)
@@ -1266,7 +1280,7 @@ module Position = struct
               (* FIXME: What is this really doing? *)
               material_key =
                 UInt64.logxor new_st.material_key
-                @@ matrix_get zobrist_data.psq
+                @@ Utils.matrix_get zobrist_data.psq
                      (Types.piece_to_enum captured_piece)
                 @@ Array.get piece_count (Types.piece_to_enum captured_piece);
             } )
@@ -1856,7 +1870,275 @@ module Position = struct
 
   (* TODO: Implement `flip` after we implement `fen` function *)
   (* TODO: Implement this *)
-  let psq_score pos = Score.mk 0 0
+  let psq_score _pos = Score.mk 0 0
+
+  (* Make empty position *)
+  let mk () =
+    {
+      board = Array.create ~len:64 None;
+      by_type_bb =
+        Array.create ~len:(List.length Types.all_piece_types) BB.empty;
+      by_colour_bb = Array.create ~len:2 BB.empty;
+      piece_count = Array.create ~len:(List.length Types.all_pieces) 0;
+      castling_rights_mask = Array.create ~len:64 0;
+      (* TODO: Reduce the repetition? *)
+      castling_rook_square =
+        Hashtbl.create
+          ~size:(List.length Types.all_castling_rights)
+          ~growth_allowed:false
+          (module struct
+            type t = Types.castling_right [@@deriving sexp, hash]
+
+            let compare = Types.compare_castling_right
+          end);
+      castling_path =
+        Hashtbl.create
+          ~size:(List.length Types.all_castling_rights)
+          ~growth_allowed:false
+          (module struct
+            type t = Types.castling_right [@@deriving sexp, hash]
+
+            let compare = Types.compare_castling_right
+          end);
+      game_ply = 0;
+      side_to_move = Types.WHITE;
+      chess960 = false;
+      st = new_st ();
+    }
+
+  (*
+   *    A FEN string defines a particular position using only the ASCII character set.
+   * 
+   *    A FEN string contains six fields separated by a space. The fields are:
+   * 
+   *    1) Piece placement (from white's perspective). Each rank is described, starting
+   *       with rank 8 and ending with rank 1. Within each rank, the contents of each
+   *       square are described from file A through file H. Following the Standard
+   *       Algebraic Notation (SAN), each piece is identified by a single letter taken
+   *       from the standard English names. White pieces are designated using upper-case
+   *       letters ("PNBRQK") whilst Black uses lowercase ("pnbrqk"). Blank squares are
+   *       noted using digits 1 through 8 (the number of blank squares), and "/"
+   *       separates ranks.
+   * 
+   *    2) Active color. "w" means white moves next, "b" means black.
+   * 
+   *    3) Castling availability. If neither side can castle, this is "-". Otherwise,
+   *       this has one or more letters: "K" (White can castle kingside), "Q" (White
+   *       can castle queenside), "k" (Black can castle kingside), and/or "q" (Black
+   *       can castle queenside).
+   * 
+   *    4) En passant target square (in algebraic notation). If there's no en passant
+   *       target square, this is "-". If a pawn has just made a 2-square move, this
+   *       is the position "behind" the pawn. Following X-FEN standard, this is recorded
+   *       only if there is a pawn in position to make an en passant capture, and if
+   *       there really is a pawn that might have advanced two squares.
+   * 
+   *    5) Halfmove clock. This is the number of halfmoves since the last pawn advance
+   *       or capture. This is used to determine if a draw can be claimed under the
+   *       fifty-move rule.
+   * 
+   *    6) Fullmove number. The number of the full move. It starts at 1, and is
+   *       incremented after Black's move.
+   * 
+   *)
+  let from_fen ?(chess960 = false) fen_str =
+    (* Helpers *)
+    let char_to_piece = function
+      | 'P' -> Some Types.W_PAWN
+      | 'N' -> Some Types.W_KNIGHT
+      | 'B' -> Some Types.W_BISHOP
+      | 'R' -> Some Types.W_ROOK
+      | 'Q' -> Some Types.W_QUEEN
+      | 'K' -> Some Types.W_KING
+      | 'p' -> Some Types.B_PAWN
+      | 'n' -> Some Types.B_KNIGHT
+      | 'b' -> Some Types.B_BISHOP
+      | 'r' -> Some Types.B_ROOK
+      | 'q' -> Some Types.B_QUEEN
+      | 'k' -> Some Types.B_KING
+      | _ -> None
+    in
+
+    let pos = mk () in
+    let fen_str = String.to_list @@ String.lstrip fen_str in
+    let bottom_squares = Types.sqs_of_rank RANK_1 in
+    (* 1. Get piece placement *)
+    let pos, fen_str =
+      (* init with pos * rank * file *)
+      Utils.fold_until fen_str ~init:(pos, 7, 0)
+        ~finish:(fun (pos, _, _) -> pos)
+        ~f:(fun (pos, rank, file) ch ->
+          if Char.equal ch ' ' then Utils.Stop pos
+          else if Utils.Char.is_digit ch then
+            Utils.Continue (pos, rank, file + Utils.Char.char_to_int_exn ch)
+          else if Char.equal ch '/' then Utils.Continue (pos, rank - 1, 0)
+          else
+            match char_to_piece ch with
+            | Some piece ->
+                let sq =
+                  Types.mk_square
+                    ~file:(Types.file_of_enum file |> Stdlib.Option.get)
+                    ~rank:(Types.rank_of_enum rank |> Stdlib.Option.get)
+                in
+                put_piece pos piece sq;
+                Utils.Continue (pos, rank, file + 1)
+                (* TODO: This should return an error? *)
+            | None -> Utils.Continue (pos, rank, file + 1))
+    in
+
+    let fen_str = String.of_list fen_str |> String.strip in
+    let regex =
+      Str.regexp
+        {|\(w\|b\) *\([K\|Q\|k\|q\|a-h\|A-H]*\) *\([a-z][0-9]\|-\) *\([0-9]*\) *\([0-9]*\)|}
+    in
+    if Str.string_match regex fen_str 0 then (
+      let colour_string = Str.matched_group 1 fen_str in
+      let castling_string = Str.matched_group 2 fen_str in
+      let ep_square_string = Str.matched_group 3 fen_str in
+      let fifty_move_string = Str.matched_group 4 fen_str in
+      let half_moves_string = Str.matched_group 5 fen_str in
+
+      (* 2. Active colour *)
+      let side_to_move =
+        if String.equal colour_string "w" then Types.WHITE else Types.BLACK
+      in
+
+      (* 3. Castling availability. Compatible with 3 standards: Normal FEN standard,
+         Shredder-FEN that uses the letters of the columns on which the rooks began
+         the game instead of KQkq and also X-FEN standard that, in case of Chess960,
+         if an inner rook is associated with the castling right, the castling tag is
+         replaced by the file letter of the involved rook, as for the Shredder-FEN. *)
+      let pos =
+        List.fold (String.to_list castling_string)
+          ~init:{ pos with side_to_move } ~f:(fun pos ch ->
+            let colour =
+              if Utils.Char.is_lower ch then Types.BLACK else Types.WHITE
+            in
+            let rook = Types.mk_piece colour Types.ROOK in
+            let rsq =
+              match Stdlib.Char.uppercase_ascii ch with
+              | 'K' ->
+                  (* Go right to left *)
+                  List.fold_until (List.rev bottom_squares) ~init:None
+                    ~finish:(fun _ -> None)
+                    ~f:(fun acc sq ->
+                      let rsq = Types.relative_sq colour sq in
+                      match piece_on pos rsq with
+                      | Some piece when Types.equal_piece piece rook ->
+                          Stop (Some rsq)
+                      | _ -> Continue acc)
+              | 'Q' ->
+                  (* Go left to right *)
+                  List.fold_until bottom_squares ~init:None
+                    ~finish:(fun _ -> None)
+                    ~f:(fun acc sq ->
+                      let rsq = Types.relative_sq colour sq in
+                      match piece_on pos rsq with
+                      | Some piece when Types.equal_piece piece rook ->
+                          Stop (Some rsq)
+                      | _ -> Continue acc)
+              | 'A' .. 'H' as ch ->
+                  Some
+                    (Types.mk_square
+                       ~file:
+                         (Stdlib.Option.get
+                         @@ Types.file_of_enum
+                              (Stdlib.Char.code ch - Stdlib.Char.code 'A'))
+                       ~rank:(Types.relative_rank colour Types.RANK_1))
+              | _ -> None
+            in
+            match rsq with
+            | Some rsq -> set_castling_right pos colour rsq
+            | None -> pos)
+      in
+
+      let pos =
+        (* 4. En passant square.
+           Ignore if square is invalid or not on side to move relative rank 6. *)
+        match String.to_list ep_square_string with
+        | [ '-' ] -> pos
+        | [ col; row ] -> (
+            match (col, row, pos.side_to_move) with
+            | 'a' .. 'h', '6', WHITE | 'a' .. 'h', '3', BLACK ->
+                let ep_square =
+                  Types.mk_square
+                    ~file:
+                      (Stdlib.Char.code col - Stdlib.Char.code 'a'
+                      |> Types.file_of_enum |> Stdlib.Option.get)
+                    ~rank:
+                      (Stdlib.Char.code row - Stdlib.Char.code '1'
+                      |> Types.rank_of_enum |> Stdlib.Option.get)
+                in
+
+                (* En passant square will be considered only if
+                   a) side to move have a pawn threatening epSquare
+                   b) there is an enemy pawn in front of epSquare
+                   c) there is no piece on epSquare or behind epSquare *)
+                let other_side_to_move = Types.other_colour pos.side_to_move in
+                let attackers =
+                  BB.bb_and
+                    (BB.pawn_attacks_bb other_side_to_move
+                       (BB.square_bb ep_square))
+                    (pieces_of_colour_and_pt pos pos.side_to_move PAWN)
+                in
+                let ep_square_front =
+                  BB.bb_and
+                    (pieces_of_colour_and_pt pos other_side_to_move PAWN)
+                    (Types.sq_plus_dir ep_square
+                       (Types.pawn_push_direction other_side_to_move)
+                    |> Stdlib.Option.get |> BB.square_bb)
+                in
+
+                let ep_square_on_behind =
+                  BB.bb_and (pieces pos)
+                    (Types.sq_plus_dir ep_square
+                       (Types.pawn_push_direction pos.side_to_move)
+                    |> Stdlib.Option.get |> BB.square_bb
+                    |> BB.sq_or_bb ep_square)
+                in
+                let pos =
+                  if
+                    BB.bb_not_zero attackers
+                    && BB.bb_not_zero ep_square_front
+                    && BB.bb_is_empty ep_square_on_behind
+                  then
+                    { pos with st = { pos.st with ep_square = Some ep_square } }
+                  else pos
+                in
+
+                pos
+            | _ -> pos)
+        (* This shouldn't be possible since we have a regex match *)
+        | _ -> assert false
+      in
+
+      (* 5-6. Halfmove clock and fullmove number *)
+      let rule50 =
+        Int.of_string_opt fifty_move_string |> Stdlib.Option.value ~default:0
+      in
+
+      let game_ply =
+        let tmp =
+          Int.of_string_opt half_moves_string |> Stdlib.Option.value ~default:0
+        in
+        Int.max (2 * (tmp - 1)) 0
+        + Bool.to_int (Types.equal_colour pos.side_to_move BLACK)
+      in
+
+      let pos =
+        set_state { pos with game_ply; chess960; st = { pos.st with rule50 } }
+      in
+
+      assert (pos_is_ok pos);
+      Ok pos)
+    else Error "Invalid FEN format"
 end
 
 let%test_unit "dummy_test" = ()
+
+(* TODO: Might want to add more tests, just to be sure. *)
+let%test_unit "load_start_position_fen" =
+  let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" in
+  match Position.from_fen ~chess960:false fen with
+  | Ok pos -> assert (Position.pos_is_ok pos)
+  | Error _ -> assert false

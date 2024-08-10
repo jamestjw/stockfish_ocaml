@@ -26,6 +26,7 @@ module Types = struct
 
   (* TODO: We can represent this as a bit-wise enum when we need it. *)
   type castling_right = WHITE_OO | WHITE_OOO | BLACK_OO | BLACK_OOO
+  [@@deriving sexp, ord, hash]
 
   let all_castling_rights = [ WHITE_OO; WHITE_OOO; BLACK_OO; BLACK_OOO ]
 
@@ -96,7 +97,7 @@ module Types = struct
     | B_ROOK
     | B_QUEEN
     | B_KING
-  [@@deriving enum, eq]
+  [@@deriving enum, eq, show]
 
   let all_pieces =
     [
@@ -195,7 +196,7 @@ module Types = struct
     | F8
     | G8
     | H8
-  [@@deriving enum, sexp, ord, eq]
+  [@@deriving enum, sexp, ord, eq, show]
 
   let all_squares =
     [
@@ -369,6 +370,14 @@ module Types = struct
   let all_ranks =
     [ RANK_1; RANK_2; RANK_3; RANK_4; RANK_5; RANK_6; RANK_7; RANK_8 ]
 
+  let sqs_of_rank rank =
+    let base = rank_to_enum rank * 8 in
+    List.rev
+    @@ List.fold ~init:[]
+         ~f:(fun acc i ->
+           (Stdlib.Option.get @@ square_of_enum @@ (base + i)) :: acc)
+         Utils.(0 -- 7)
+
   (* TODO: This needs to do more checks, e.g. H4 + EAST should be invalid *)
   let sq_plus_dir sq dir =
     square_to_enum sq + direction_to_enum dir |> square_of_enum
@@ -383,6 +392,12 @@ module Types = struct
 
   let sq_sub_dir_twice sq dir =
     match sq_sub_dir sq dir with Some res -> sq_sub_dir res dir | None -> None
+
+  let shift_sq_exn dir n sq =
+    let helper sq =
+      match sq with None -> None | Some sq -> sq_plus_dir sq dir
+    in
+    Fn.apply_n_times ~n helper (Some sq) |> Stdlib.Option.get
 
   (* Swap A1 <-> A8 *)
   let flip_sq_rank sq =
@@ -654,3 +669,17 @@ let%test_unit "test_move_is_ok" =
     @@ Types.mk_move ~ppt:Types.QUEEN ~move_type:Types.PROMOTION Types.F7
          Types.H8)
     true
+
+let%test_unit "squares_of_rank" =
+  [%test_eq: Types.square list]
+    (Types.sqs_of_rank Types.RANK_5)
+    [
+      Types.A5;
+      Types.B5;
+      Types.C5;
+      Types.D5;
+      Types.E5;
+      Types.F5;
+      Types.G5;
+      Types.H5;
+    ]

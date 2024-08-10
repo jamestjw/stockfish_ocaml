@@ -1,1 +1,17 @@
-let () = print_endline "Hello, World!"
+let () =
+  (* let regex = Str.regexp   *)
+  (* {|\(w\|b\) *\([K\|Q\|k\|q\|a-h\|A-H]*\) *\([a-z][0-9]\|-\) *\([0-9]+\)? *\([0-9]+\)?|} in *)
+  (* let regex = Str.regexp   *)
+  (* {|\(w\|b\) *\([K\|Q\|k\|q\|a-h\|A-H]*\) *\([a-z][0-9]\|-\) *\([0-9]*\) *\([0-9]*\)|} in *)
+  (* let input = "w KQkq d6 100 123123" in *)
+  (* let input = "w KQkq d6 100" in *)
+  (*  *)
+  (* let matched = Str.string_match regex input 0 in *)
+  (*  *)
+  (* if matched then  *)
+  (* ( *)
+  (* print_endline @@ Str.matched_group 4 input; *)
+  (* print_endline @@ Str.matched_group 5 input; *)
+  (* ) *)
+  (* else *)
+  print_endline "No match :( "
