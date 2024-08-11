@@ -88,8 +88,7 @@ module Search = struct
     }
 
   (* Check if move is equal to the root of the PV *)
-  let root_move_eq_move { pv; _ } m =
-    List.rev pv |> List.hd_exn |> Types.equal_move m
+  let root_move_eq_move { pv; _ } m = List.last_exn pv |> Types.equal_move m
 
   (* Sort in descending order *)
   let root_move_lt m1 m2 =
@@ -404,9 +403,11 @@ module Search = struct
 
     let rec step1 worker stack ss alpha beta =
       (* Step 1. Initialize node *)
-      let curr_se = Array.get stack ss in
       let curr_se =
-        { curr_se with in_check = BB.bb_not_zero @@ P.checkers pos }
+        {
+          (Array.get stack ss) with
+          in_check = BB.bb_not_zero @@ P.checkers pos;
+        }
       in
       let next_se = Array.get stack @@ (ss + 1) in
 
@@ -414,12 +415,12 @@ module Search = struct
         if is_pv then (
           let next_se = { next_se with pv = [] } in
           let curr_se = { curr_se with pv = [ Types.none_move ] } in
-          Array.set stack ss curr_se;
           Array.set stack (ss + 1) next_se;
           curr_se)
         else curr_se
       in
 
+      Array.set stack ss curr_se;
       (* Used to send selDepth info to GUI (selDepth counts from 1, ply from 0) *)
       let worker =
         if is_pv && worker.sel_depth < curr_se.ply + 1 then
@@ -519,6 +520,8 @@ module Search = struct
                 (* In case of null move search, use previous static eval with a different sign *)
                 let unadjusted_static_eval =
                   if Types.move_not_null prev_se.current_move then
+                    (* Stdlib.print_endline "Pos before eval"; *)
+                    (* Stdlib.print_endline @@ P.show pos; *)
                     Evaluation.evaluate pos @@ optimism worker us
                   else -prev_se.static_eval
                 in
@@ -587,6 +590,7 @@ module Search = struct
       let rec loop ~mp ~worker ~move_count ~quiet_check_evasions ~best_value
           ~best_move ~alpha =
         let mp, move = MP.next_move mp in
+        (* Stdlib.Printf.printf "depth %d move: %s\n" depth (Types.show_move move); *)
         if Types.move_not_none move then (
           assert (Types.move_is_ok move);
           if not @@ P.legal pos move then
@@ -633,10 +637,16 @@ module Search = struct
         and step7 ~quiet_check_evasions =
           (* Step 7. Make and search the move *)
           let pos = P.do_move pos move gives_check in
+
+          (* Stdlib.print_endline "after doing move:"; *)
+          (* Stdlib.print_endline @@ P.show pos; *)
           let worker, value =
             qsearch_inv worker node_type pos stack (ss + 1) (-beta) (-alpha)
               (depth - 1)
           in
+
+          (* Stdlib.print_endline "after qsearch :"; *)
+          (* Stdlib.print_endline @@ P.show pos; *)
           let pos = P.undo_move pos move in
 
           assert (value > -Types.value_infinite && value < Types.value_infinite);
@@ -1840,6 +1850,7 @@ module Search = struct
         tt_value tt_move unadjusted_static_eval prev_sq excluded_move mp
         move_count_pruning cont_hist =
       (* Step 20. Check for a new best move *)
+      (* Stdlib.Printf.printf "Step20 with value %d\n" value; *)
 
       (* TODO: Early stopping here *)
       let worker =
@@ -1920,49 +1931,55 @@ module Search = struct
           move_count_pruning move_count cont_hist
       in
 
-      if value > best_value then (
-        let best_move = move in
-        let curr_se = Array.get stack ss in
-        let next_se = Array.get stack @@ (ss + 1) in
-        let curr_se =
-          (* Update pv even in fail-high case *)
-          if is_pv && not is_root then
-            { curr_se with pv = update_pv curr_se.pv move next_se.pv }
-          else curr_se
-        in
-        if value >= beta then (
-          (* Fail high *)
+      (* TODO: WTF happened here? this is wrong *)
+      if value > best_value then
+        let best_value = value in
+        if value > alpha then (
+          let best_move = move in
+          let curr_se = Array.get stack ss in
+          let next_se = Array.get stack @@ (ss + 1) in
           let curr_se =
-            {
-              curr_se with
-              cut_off_count =
-                curr_se.cut_off_count + 1
-                + (Bool.to_int @@ Types.move_is_none tt_move);
-            }
+            (* Update pv even in fail-high case *)
+            if is_pv && not is_root then
+              { curr_se with pv = update_pv curr_se.pv move next_se.pv }
+            else curr_se
           in
-          Array.set stack ss curr_se;
-          (* Skip to next move *)
-          step13 worker stack ss best_value max_value best_move alpha beta depth
-            improving searched tte tt_capture tt_value tt_move
-            unadjusted_static_eval prev_sq excluded_move mp value
-            move_count_pruning move_count cont_hist)
-        else
-          (* Reduce other moves if we have found at least one score improvement (~2 Elo) *)
-          let depth =
-            if depth > 2 && depth < 13 && beta < 13652 && value > -12761 then
-              depth - 2
-            else depth
-          in
+          if value >= beta then (
+            (* Fail high *)
+            let curr_se =
+              {
+                curr_se with
+                cut_off_count =
+                  curr_se.cut_off_count + 1
+                  + (Bool.to_int @@ Types.move_is_none tt_move);
+              }
+            in
+            Array.set stack ss curr_se;
+            (* Skip to next move *)
+            transition_next_move searched best_value best_move depth alpha)
+          else
+            (* Reduce other moves if we have found at least one score improvement (~2 Elo) *)
+            let depth =
+              if depth > 2 && depth < 13 && beta < 13652 && value > -12761 then
+                depth - 2
+              else depth
+            in
 
-          assert (depth > 0);
-          (* Update alpha! Always alpha < beta *)
-          let alpha = value in
-          Array.set stack ss curr_se;
-          transition_next_move searched best_value best_move depth alpha)
+            assert (depth > 0);
+            (* Update alpha! Always alpha < beta *)
+            let alpha = value in
+            Array.set stack ss curr_se;
+            step21 worker stack ss best_value max_value alpha beta depth
+              unadjusted_static_eval prev_sq excluded_move move_count best_move
+              searched)
+        else transition_next_move searched best_value best_move depth alpha
       else transition_next_move searched best_value best_move depth alpha
     and step21 worker stack ss best_value max_value alpha beta depth
         unadjusted_static_eval prev_sq excluded_move move_count best_move
         (quiets_searched, captures_searched) =
+      (* Stdlib.Printf.printf "Reached step21 with best_value: %d best_move:%s\n" *)
+      (* best_value *)
+      (* (Types.show_move best_move); *)
       (* Step 21. Check for mate and stalemate
          All legal moves have been searched and if there are no legal moves, it
          must be a mate or a stalemate. If we are in a singular extension search then
@@ -1972,7 +1989,7 @@ module Search = struct
       assert (
         move_count <> 0 || (not curr_se.in_check)
         || Types.move_not_none excluded_move
-        || List.length @@ MG.generate MG.LEGAL pos = 0);
+        || (List.is_empty @@ MG.generate MG.LEGAL pos));
       (* Adjust best value for fail high cases at non-pv nodes *)
       let best_value =
         if
@@ -2090,6 +2107,8 @@ module Search = struct
         else worker
       in
 
+      (* Stdlib.Printf.printf "Best value is %d in position:\n" best_value; *)
+      (* Stdlib.print_endline @@ P.show pos; *)
       assert (
         best_value > -Types.value_infinite && best_value < Types.value_infinite);
 
@@ -2111,7 +2130,7 @@ module Search = struct
           && beta <= Types.value_infinite);
         assert (is_pv || alpha = beta - 1);
         assert (0 < depth && depth < Types.max_ply);
-        assert ((not @@ is_pv) && is_cut_node);
+        assert (not (is_pv && is_cut_node));
 
         step1 worker stack ss)
 
@@ -2157,7 +2176,7 @@ module Search = struct
     (* TODO: For now, only allow one PV? *)
     let _multi_pv = 1 in
     (* TODO: For now, hard code max depth? *)
-    let depth_limit = 5 in
+    let depth_limit = 3 in
 
     let rec loop ({ root_depth; root_moves; _ } as worker) to_best_move_changes
         search_again_counter last_best_pv last_best_score last_best_move_depth
@@ -2278,6 +2297,53 @@ module Search = struct
         (-Types.value_infinite)
     in
     worker
+
+  (* Called when the program receives the UCI 'go' command.
+     It searches from the root position and outputs the "bestmove". *)
+  let start_searching worker =
+    let worker = { worker with tt = TT.new_search worker.tt } in
+    if List.is_empty worker.root_moves then
+      (* TODO: Handle checkmate by printing appropriate info? *)
+      Error "No legal moves"
+    else
+      let worker = iterative_deepening worker in
+      match worker.root_moves with
+      | rm :: _ ->
+          let best_move = List.last_exn rm.pv in
+          Ok (worker, best_move)
+      | _ -> Error "<FATAL> No root moves?"
+
+  let start_thinking pos =
+    let root_moves = MG.generate MG.LEGAL pos |> List.map ~f:mk_root_move in
+    let worker =
+      {
+        root_moves;
+        nodes = 0;
+        tb_hits = 0;
+        nmp_min_ply = 0;
+        best_move_changes = 0;
+        root_depth = 0;
+        completed_depth = 0;
+        root_pos = pos;
+        pv_idx = 0;
+        pv_last = 0;
+        tt = TT.mk ();
+        correction_history = MP.CorrectionHistory.make ();
+        main_history = MP.ButterflyHistory.make ();
+        counter_moves = MP.CounterMoveHistory.make ();
+        pawn_history = MP.PawnHistory.make ();
+        capture_history = MP.CapturePieceToHistory.make ();
+        continuation_history =
+          ( (MP.ContinuationHistory.make (), MP.ContinuationHistory.make ()),
+            (MP.ContinuationHistory.make (), MP.ContinuationHistory.make ()) );
+        sel_depth = 0;
+        optimism = (0, 0);
+        root_delta = 0;
+        reductions = Array.create ~len:Types.max_moves 0;
+      }
+    in
+    (* TODO: Handle more workers? *)
+    start_searching worker
 
   let%test_unit "test_root_move_order" =
     let m1 =

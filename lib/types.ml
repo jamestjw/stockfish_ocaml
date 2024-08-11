@@ -56,7 +56,9 @@ module Types = struct
      a module. *)
 
   let max_moves = 256
-  let max_ply = 246
+  let max_ply = 3
+
+  (* let max_ply = 246 *)
   let value_zero = 0
   let value_draw = 0
   let value_none = 32002
@@ -466,6 +468,20 @@ module Types = struct
     | B_QUEEN -> BLACK
     | B_KING -> BLACK
 
+  let short_piece_name = function
+    | W_PAWN -> "P"
+    | W_KNIGHT -> "N"
+    | W_BISHOP -> "B"
+    | W_ROOK -> "R"
+    | W_QUEEN -> "Q"
+    | W_KING -> "K"
+    | B_PAWN -> "p"
+    | B_KNIGHT -> "n"
+    | B_BISHOP -> "b"
+    | B_ROOK -> "r"
+    | B_QUEEN -> "q"
+    | B_KING -> "k"
+
   let mk_square ~file ~rank =
     Int.shift_left (rank_to_enum rank) 3 + file_to_enum file
     |> square_of_enum |> Stdlib.Option.get
@@ -499,7 +515,7 @@ module Types = struct
   let mated_in ply = -value_mate + ply
 
   type move_type = NORMAL | PROMOTION | EN_PASSANT | CASTLING
-  [@@deriving enum, ord, eq, sexp]
+  [@@deriving enum, ord, eq, sexp, show]
 
   type move = { data : int; value : int } [@@deriving sexp]
 
@@ -534,10 +550,10 @@ module Types = struct
 
     let data =
       Int.shift_left special_move_flag 2
-      |> Int.bit_xor ppt_flag |> shift_left 6
-      |> Int.bit_xor (square_to_enum src)
+      |> Int.bit_or ppt_flag |> shift_left 6
+      |> Int.bit_or (square_to_enum src)
       |> shift_left 6
-      |> Int.bit_xor (square_to_enum dst)
+      |> Int.bit_or (square_to_enum dst)
     in
     { data; value }
 
@@ -566,6 +582,14 @@ module Types = struct
     | 2 -> Some ROOK
     | 3 -> Some QUEEN
     | _ -> None
+
+  let show_move move =
+    if move_is_none move then "<none>"
+    else if not @@ move_not_null move then "<null>"
+    else
+      Printf.sprintf "%s%s"
+        (show_square @@ move_src move)
+        (show_square @@ move_dst move)
 
   let depth_qs_checks = 0
   let depth_qs_no_checks = -1
@@ -630,7 +654,7 @@ let%test_unit "test_file_of_sq" =
   [%test_result: Types.file] ~expect:Types.FILE_G (Types.file_of_sq Types.G6);
   [%test_result: Types.file] ~expect:Types.FILE_H (Types.file_of_sq Types.H6)
 
-let%test_unit "test_rank__of_sq" =
+let%test_unit "test_rank_of_sq" =
   [%test_result: Types.rank] ~expect:Types.RANK_4 (Types.rank_of_sq Types.E4);
   [%test_result: Types.rank] ~expect:Types.RANK_5 (Types.rank_of_sq Types.F5);
   [%test_result: Types.rank] ~expect:Types.RANK_6 (Types.rank_of_sq Types.G6);
@@ -649,6 +673,16 @@ let%test_unit "test_relative_rank" =
     (Types.relative_rank Types.BLACK Types.RANK_1);
   [%test_result: Types.rank] ~expect:Types.RANK_3
     (Types.relative_rank Types.BLACK Types.RANK_6)
+
+let%test_unit "test_normal_pawn_move" =
+  let move = Types.mk_move Types.E5 Types.E4 in
+  [%test_result: Types.square] ~expect:Types.E4 (Types.move_src move);
+  [%test_result: Types.square] ~expect:Types.E5 (Types.move_dst move);
+  [%test_result: Types.move_type] ~expect:Types.NORMAL
+    (Types.get_move_type move)
+(* TODO: This return KNIGHT since we don't have enough bits to represent
+   the absence of a ppt *)
+(* [%test_result: Types.piece_type option] ~expect:None (Types.get_ppt move) *)
 
 let%test_unit "test_construct_and_deconstruct_move" =
   let move =

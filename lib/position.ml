@@ -79,6 +79,32 @@ module Position = struct
     st : state_info;
   }
 
+  let show { board; _ } =
+    let res =
+      List.fold ~init:"+---+---+---+---+---+---+---+---+\n"
+        ~f:(fun acc rank ->
+          let res =
+            List.fold ~init:acc
+              ~f:(fun acc file ->
+                let to_add =
+                  match
+                    Array.get board
+                      (Types.mk_square ~file ~rank |> Types.square_to_enum)
+                  with
+                  | Some piece ->
+                      Printf.sprintf "| %s " (Types.short_piece_name piece)
+                  | None -> "|   "
+                in
+                acc ^ to_add)
+              Types.all_files
+          in
+          res
+          ^ Printf.sprintf "| %d\n\n+---+---+---+---+---+---+---+---+\n"
+              (Types.rank_to_enum rank + 1))
+        (List.rev Types.all_ranks)
+    in
+    res ^ "  a   b   c   d   e   f   g   h\n"
+
   let side_to_move { side_to_move; _ } = side_to_move
   let piece_on { board; _ } sq = Array.get board (Types.square_to_enum sq)
   let piece_on_exn pos sq = piece_on pos sq |> Stdlib.Option.get
@@ -752,9 +778,12 @@ module Position = struct
        yet we skip the legality check of MoveList<LEGAL>(). *)
     if not @@ Types.equal_move_type (Types.get_move_type m) Types.NORMAL then
       failwith "TODO: Implement this after move generation is done"
-    else (
-      (* We know this is not a promotion, hence `ppt` should be None *)
-      assert (Types.get_ppt m |> Option.is_none);
+    else
+      (* FIXME: We know this is not a promotion, hence `ppt` should be None,
+         but we only have 4 bits to represent the `ppt`, so we put the
+         responsibility on the caller to not rely on the `ppt` when the
+         move type is not PROMOTION *)
+      (* assert (Types.get_ppt m |> Option.is_none); *)
       match piece with
       | None -> false (* If there is no piece, the move is definitely illegal *)
       | Some piece ->
@@ -832,7 +861,7 @@ module Position = struct
               BB.bb_is_empty
                 (attackers_to_occupied pos dst (BB.bb_xor_sq all_pieces src)
                 |> BB.bb_and their_pieces)
-          else true)
+          else true
 
   (* Tests whether a pseudo-legal move gives a check *)
   (* TODO: Unit test this *)
@@ -1451,6 +1480,8 @@ module Position = struct
     let them = side_to_move in
     let src = Types.move_src m in
     let dst = Types.move_dst m in
+
+    let pc = piece_on_exn pos dst in
     let pos = { pos with side_to_move = us } in
 
     (* The source should be empty now... unless it was CASTLING, in which
@@ -1483,7 +1514,6 @@ module Position = struct
 
         match captured_piece with
         | Some captured_piece ->
-            let pc = piece_on_exn pos dst in
             let cap_sq =
               (* Captured sq is not the destination if it was en passant *)
               if Types.equal_move_type Types.EN_PASSANT @@ Types.get_move_type m
@@ -1753,7 +1783,10 @@ module Position = struct
       Types.value_zero >= threshold
     else
       (* Value of winning the destination piece *)
-      let swap = (Types.piece_value @@ piece_on_exn pos dst) - threshold in
+      let dst_piece_value =
+        match piece_on pos dst with Some p -> Types.piece_value p | None -> 0
+      in
+      let swap = dst_piece_value - threshold in
       (* If taking it for free isn't good enough, then nothing will be *)
       if swap < 0 then false
       else

@@ -80,10 +80,11 @@ module MovePick = struct
 
       let add e bonus =
         assert (Int.abs bonus <= bounds);
+
         let abs_bonus = T.of_int @@ Int.abs bonus in
         let bonus = T.of_int bonus in
         let e =
-          T.add e @@ T.sub bonus (T.mul e (T.div abs_bonus @@ T.of_int bounds))
+          T.add e @@ T.sub bonus (T.div (T.mul e abs_bonus) (T.of_int bounds))
         in
         assert (Int.abs @@ T.to_int e <= bounds);
         e
@@ -286,10 +287,10 @@ module MovePick = struct
     | QCAPTURE
     | QCHECK_INIT
     | QCHECK
-  [@@deriving enum]
+  [@@deriving enum, show]
 
   let next_stage_exn stage =
-    stage_to_enum stage |> stage_of_enum |> Stdlib.Option.get
+    stage_to_enum stage |> ( + ) 1 |> stage_of_enum |> Stdlib.Option.get
 
   (*
    * MovePicker is used to pick one pseudo-legal move at a time from the
@@ -392,7 +393,7 @@ module MovePick = struct
 
   (* Move picker for quiescence search *)
   let mk_for_qs ~pos ~tt_move ~depth ~mh ~cph ~ch ~ph =
-    assert (depth > 0);
+    assert (depth <= 0);
     let in_check = P.checkers pos |> BB.bb_not_zero in
     let exists_tt_move =
       Types.move_not_none tt_move && P.pseudo_legal pos tt_move
@@ -624,6 +625,7 @@ module MovePick = struct
          refutations;
          _;
        } as mp) =
+    (* Stdlib.Printf.printf "Next move, stage : %s\n" (show_stage stage); *)
     let quiet_threshold d = -3330 * d in
     match stage with
     | MAIN_TT | EVASION_TT | QSEARCH_TT | PROBCUT_TT ->
